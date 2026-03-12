@@ -152,6 +152,59 @@ pytest
 pytest --cov=claude_memory
 ```
 
+## Making It Reliable
+
+Johnny-five works best when Claude knows to use it automatically. The `setup/` directory contains ready-to-use snippets.
+
+### 1. Add to your CLAUDE.md
+
+Copy `setup/CLAUDE.md.snippet` into your global `~/.claude/CLAUDE.md` (applies to all projects) or a project-specific `CLAUDE.md`. This tells Claude when to store, search, and recall memories.
+
+**Linux/macOS:**
+```bash
+cat setup/CLAUDE.md.snippet >> ~/.claude/CLAUDE.md
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-Content setup\CLAUDE.md.snippet | Add-Content $env:USERPROFILE\.claude\CLAUDE.md
+```
+
+### 2. Add hooks for auto-recall and auto-save
+
+Hooks make memory fully automatic — recall at session start, save learnings at session end. Merge `setup/hooks.json.snippet` into your Claude Code settings.
+
+**Where to put hooks:**
+
+- **Global** (all projects): `~/.claude/settings.json`
+- **Project-specific**: `.claude/settings.json` in your repo
+
+If you already have a `settings.json`, merge the `hooks` key. If not, copy the snippet as-is:
+
+```bash
+# Global (creates file if it doesn't exist)
+cp setup/hooks.json.snippet ~/.claude/settings.json
+
+# Or for a specific project
+cp setup/hooks.json.snippet /path/to/project/.claude/settings.json
+```
+
+> **How it works:** The `SessionStart` hook prompts Claude to call `memory_recall` at the beginning of every conversation. The `Stop` hook prompts Claude to review the conversation for anything worth storing before finishing. Both are silent no-ops if the johnny-five MCP server isn't connected.
+
+### 3. Add MCP config to your project
+
+Add to `.mcp.json` in your project root (see [Quick Start](#quick-start) above). This is per-project — each project that should use memory needs this entry.
+
+### 4. Verify it works
+
+Start a Claude Code session in your project and ask:
+
+```
+Use memory_stats to check if johnny-five is connected
+```
+
+You should see `{"by_type": {}, "by_tier": {}, "total": 0}` for a fresh database.
+
 ## Architecture
 
 ```
