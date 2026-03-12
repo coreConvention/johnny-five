@@ -1,0 +1,39 @@
+## Johnny-Five Memory System
+
+You have access to a persistent memory system via the `johnny-five` MCP server. Use it to remember context across conversations.
+
+### When to Store Memories
+
+Store memories proactively — don't wait to be asked:
+
+- **User corrections**: When the user corrects your approach → `memory_store` with type `feedback`, importance 8-9
+- **User preferences**: When you learn how the user likes to work → `memory_store` with type `user`, importance 7-8
+- **Project context**: Architecture decisions, tech stack, conventions → `memory_store` with type `project`, importance 6-8
+- **Lessons learned**: Debugging insights, mistakes to avoid → `memory_store` with type `lesson`, importance 7-9
+- **External references**: URLs, dashboard locations, ticket systems → `memory_store` with type `reference`, importance 5-7
+
+Always include `project_dir` when the memory is project-specific. Always include relevant `tags` for categorization.
+
+### When to Search/Recall
+
+- **Session start**: Call `memory_recall` with `project_dir` and a brief `initial_context` describing the work ahead
+- **Before making assumptions**: Search with `memory_search` to check if you've learned something relevant before
+- **When the user says "remember"**: They may be referring to something stored in a previous conversation
+
+### When to Run Maintenance
+
+- Call `memory_aging` periodically (e.g., once per long session) to decay stale memories
+- Call `memory_consolidate` if `memory_stats` shows many cold-tier memories
+
+### Docker Management
+
+The johnny-five container must be running for memory tools to work. If you get MCP connection errors:
+
+```bash
+# Check status
+docker ps --filter name=johnny-five --format "{{.Names}} {{.Status}}"
+
+# Restart if needed (stdio transport needs -i flag)
+docker stop johnny-five 2>/dev/null; docker rm johnny-five 2>/dev/null
+docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest --transport stdio
+```

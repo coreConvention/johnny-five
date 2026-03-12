@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "prompt",
+        "prompt": "You have a persistent memory system (johnny-five) available via MCP tools. At the start of this session, call `memory_recall` with the current project_dir and a brief initial_context based on what the user is asking about. This will load relevant memories from previous conversations. If the memory MCP server is not connected, silently skip this step."
+      }
+    ],
+    "Stop": [
+      {
+        "type": "prompt",
+        "prompt": "Before finishing, review this conversation for any of the following worth storing as persistent memories:\n\n1. User corrections to your approach (type: feedback, importance: 8-9)\n2. New information about the user's role or preferences (type: user, importance: 7-8)\n3. Project decisions or architecture changes (type: project, importance: 6-8)\n4. Debugging lessons or mistakes made (type: lesson, importance: 7-9)\n5. External resource locations mentioned (type: reference, importance: 5-7)\n\nIf you find anything worth remembering, call `memory_store` for each item. Include project_dir and relevant tags. If nothing new was learned, skip this step silently — do not tell the user you have nothing to store."
+      }
+    ]
+  }
+}
