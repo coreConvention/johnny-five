@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-memory"
+name = "johnny-five"
 version = "0.1.0"
-description = "Persistent memory system for Claude Code with multi-signal retrieval"
+description = "Need more input! Persistent memory system for Claude Code with multi-signal retrieval"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
@@ -28,7 +28,7 @@ dev = [
 ]
 
 [project.scripts]
-claude-memory = "claude_memory.server:main"
+johnny-five = "claude_memory.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_memory"]

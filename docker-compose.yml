@@ -1,15 +1,16 @@
 services:
-  claude-memory:
+  johnny-five:
     build: .
+    image: johnny-five:latest
     ports:
       - "8787:8787"
     volumes:
-      - memory-data:/data
+      - johnny-five-data:/data
     environment:
       - MEMORY_DB_PATH=/data/memory.db
       - MEMORY_MODEL=all-MiniLM-L6-v2
     command: ["--transport", "sse", "--port", "8787"]
 
 volumes:
-  memory-data:
+  johnny-five-data:
     driver: local
