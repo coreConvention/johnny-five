@@ -27,6 +27,13 @@
 - **Correction**: Pass raw Python objects (lists, dicts) to `MemoryRecord`; let `insert_memory` handle the single JSON serialization.
 - **Rule**: Trace the full data path from construction → serialization → storage. Only serialize at the boundary (the function that writes to the database), never before.
 
+## 2026-03-12
+
+### [Communication] Never push to remote without explicit confirmation
+- **Mistake**: Pushed commits to GitHub without asking the user first. Bundled `git push` into the same command as `git commit`.
+- **Correction**: User said "I don't like you pushing without asking."
+- **Rule**: Always ask before `git push`. Committing locally is fine when requested, but pushing to remote affects shared state and requires explicit confirmation every time. Never combine push into a commit command without asking.
+
 ### [Security] Sanitize user input for FTS5 MATCH queries
 - **Mistake**: Passed raw user queries to SQLite FTS5 MATCH clause. Characters like `?`, `*`, `"`, `(`, `)` have special meaning in FTS5 syntax and cause `OperationalError: fts5: syntax error`.
 - **Correction**: Added `_sanitize_fts_query()` that strips special characters and wraps each token in double quotes for literal matching.
