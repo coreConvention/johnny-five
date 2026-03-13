@@ -28,19 +28,17 @@ Add to your project's `.mcp.json`:
 {
   "mcpServers": {
     "johnny-five": {
-      "command": "docker",
+      "command": "bash",
       "args": [
-        "run", "--rm", "-i",
-        "-v", "johnny-five-data:/data",
-        "johnny-five:latest"
-      ],
-      "env": {
-        "MEMORY_DB_PATH": "/data/memory.db"
-      }
+        "-c",
+        "docker start johnny-five 2>/dev/null || docker run -d --name johnny-five -i -v johnny-five-data:/data -e MEMORY_DB_PATH=/data/memory.db johnny-five:latest >/dev/null; docker attach johnny-five"
+      ]
     }
   }
 }
 ```
+
+This reuses an existing `johnny-five` container if one exists, or creates a new one. The container persists between sessions, avoiding cold-start delays from re-downloading the embedding model.
 
 Then restart Claude Code. The memory tools will be available automatically.
 
