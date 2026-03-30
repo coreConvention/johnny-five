@@ -105,6 +105,7 @@ All settings are configurable via `MEMORY_*` environment variables:
 |----------|---------|-------------|
 | `MEMORY_DB_PATH` | `~/.claude/memory.db` | SQLite database path |
 | `MEMORY_MODEL_NAME` | `all-MiniLM-L6-v2` | Embedding model (384-dim) |
+| `MEMORY_EMBEDDING_DIM` | `384` | Vector dimensionality (must match model) |
 | `MEMORY_TOP_K` | `15` | Default search result count |
 | `MEMORY_DEDUP_THRESHOLD` | `0.15` | Cosine distance for near-duplicate detection |
 | `MEMORY_ALPHA` | `0.45` | Semantic similarity weight |
@@ -112,6 +113,10 @@ All settings are configurable via `MEMORY_*` environment variables:
 | `MEMORY_GAMMA` | `0.10` | Frequency weight |
 | `MEMORY_DELTA` | `0.25` | Importance weight |
 | `MEMORY_DECAY_RATE` | `0.995` | Daily importance decay multiplier |
+| `MEMORY_HOT_ACCESS_THRESHOLD` | `3` | Min accesses in 30 days to stay in hot tier |
+| `MEMORY_WARM_DAYS` | `30` | Days without access before warm demotion |
+| `MEMORY_COLD_DAYS` | `180` | Days without access before cold demotion |
+| `MEMORY_COLD_IMPORTANCE_THRESHOLD` | `3.0` | Max importance for cold demotion |
 | `MEMORY_SERVER_PORT` | `8787` | SSE transport port |
 
 ## Alternative Transports
@@ -202,6 +207,103 @@ Use memory_stats to check if johnny-five is connected
 ```
 
 You should see `{"by_type": {}, "by_tier": {}, "total": 0}` for a fresh database.
+
+## Concurrent Sessions
+
+The default `.mcp.json` config uses `docker attach`, which connects to the container's single main process. This means **only one Claude Code session can connect at a time**.
+
+For concurrent sessions (e.g., parallel worktrees), use SSE transport instead:
+
+```json
+{
+  "mcpServers": {
+    "johnny-five": {
+      "type": "sse",
+      "url": "http://localhost:8787/sse"
+    }
+  }
+}
+```
+
+Run the container with port exposed:
+
+```bash
+docker run -d --name johnny-five \
+  -v johnny-five-data:/data \
+  -p 8787:8787 \
+  johnny-five:latest --transport sse --port 8787
+```
+
+## Backup & Restore
+
+The SQLite database lives in a Docker named volume (`johnny-five-data`).
+
+### Create a backup
+
+```bash
+docker run --rm -v johnny-five-data:/data -v "$(pwd)":/backup alpine \
+  cp /data/memory.db "/backup/johnny-five-backup-$(date +%Y%m%d).db"
+```
+
+Or from a running container:
+
+```bash
+docker exec johnny-five sqlite3 /data/memory.db ".backup '/data/backup.db'"
+docker cp johnny-five:/data/backup.db ./johnny-five-backup.db
+docker exec johnny-five rm /data/backup.db
+```
+
+### Restore from backup
+
+```bash
+docker stop johnny-five
+docker run --rm -v johnny-five-data:/data -v "$(pwd)":/backup alpine \
+  cp /backup/johnny-five-backup.db /data/memory.db
+docker start johnny-five
+```
+
+### Migrate to a new machine
+
+1. Create a backup (above)
+2. On the new machine: `docker build -t johnny-five:latest .`
+3. `docker volume create johnny-five-data`
+4. Restore the backup into the new volume
+5. Configure `.mcp.json` and hooks
+
+## Troubleshooting
+
+### MCP tools not available / "server not connected"
+
+- Verify Docker is running: `docker info`
+- Check container status: `docker ps -a --filter name=johnny-five`
+- Check logs: `docker logs johnny-five --tail 20`
+- If the container is stuck: `docker rm -f johnny-five` then restart Claude Code
+
+### Docker not running when Claude Code starts
+
+MCP connections are established at session init. If Docker isn't running at that point, johnny-five silently fails to connect and never retries. **Start Docker before starting Claude Code.**
+
+### Container exits immediately
+
+The entrypoint expects stdio input (MCP protocol). The `-i` (interactive) flag is required:
+
+```bash
+docker run -d --name johnny-five -i ...  # -i is mandatory
+```
+
+### Multiple sessions fail to connect
+
+Only one session can `docker attach` at a time. Switch to [SSE transport](#concurrent-sessions) for concurrent access.
+
+### Windows Git Bash: path mangling
+
+Git Bash translates `/data/...` to `C:/Program Files/Git/data/...` in `docker exec` commands. Use double-slash (`//data/`) when running manual commands:
+
+```bash
+docker exec johnny-five ls -la //data/memory.db
+```
+
+The `.mcp.json` config is unaffected because it runs inside the container's shell.
 
 ## Architecture
 
