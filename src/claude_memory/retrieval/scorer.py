@@ -1,16 +1,20 @@
 """Multi-signal scoring for memory retrieval.
 
-Combines four signals into a single relevance score:
+Combines up to five signals into a single relevance score:
 
 - **Semantic similarity** (alpha) — cosine similarity from vector search.
 - **Recency** (beta) — exponential decay based on days since last access.
 - **Frequency** (gamma) — log-scaled access count, rewarding reuse without
   letting high-frequency memories dominate.
 - **Importance** (delta) — user-assigned or system-inferred importance rating.
+- **Lexical overlap** (kappa) — fraction of query keywords present in the
+  memory content+tags; 0 when no query is available (e.g. always-load recall).
 
-Weights default to α=0.45, β=0.20, γ=0.10, δ=0.25 and are tunable via
+Weights default to α=0.45, β=0.20, γ=0.10, δ=0.25, κ=0.0 and are tunable via
 :class:`ScoringWeights` or the ``MEMORY_*`` environment variables in
-:mod:`claude_memory.config`.
+:mod:`claude_memory.config`. The production default for ``kappa`` (read
+from ``MEMORY_KAPPA``) is 0.30; leaving the dataclass default at 0.0 keeps
+existing tests and semantic-only callers unchanged.
 """
 
 from __future__ import annotations
@@ -21,12 +25,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ScoringWeights:
-    """Weights for the four retrieval signals.  Should sum to 1.0."""
+    """Weights for the retrieval signals.
+
+    The dataclass default sums to 1.0 with ``kappa=0`` so that adding the
+    keyword-boost signal is opt-in. When ``kappa > 0`` the composite score
+    may exceed 1.0, but relative ranking is preserved.
+    """
 
     alpha: float = 0.45  # semantic similarity
     beta: float = 0.20   # recency
     gamma: float = 0.10  # frequency
     delta: float = 0.25  # importance
+    kappa: float = 0.0   # lexical overlap (opt-in keyword boost)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +49,7 @@ class ScoredCandidate:
     recency_score: float
     frequency_score: float
     importance_score: float
+    lexical_score: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +127,19 @@ def compute_combined_score(
     *,
     memory_id: str = "",
     decay_rate: float = 0.01,
+    lexical_score: float = 0.0,
 ) -> ScoredCandidate:
     """Compute a weighted multi-signal score for a single memory candidate.
 
     Each signal is independently normalised to [0, 1] before being combined
     via a weighted sum:
 
-        ``score = α·semantic + β·recency + γ·frequency + δ·importance``
+        ``score = α·semantic + β·recency + γ·frequency + δ·importance + κ·lexical``
+
+    The ``κ·lexical`` term is the keyword-overlap boost: fraction of the
+    query's meaningful tokens that appear in the memory's indexed text. When
+    no query is available (e.g. session-start recall without a context
+    string), callers pass ``lexical_score=0.0``.
 
     Parameters
     ----------
@@ -136,11 +153,14 @@ def compute_combined_score(
     importance:
         Raw importance rating on a 0–10 scale.
     weights:
-        Signal weights.  Defaults to the standard weights.
+        Signal weights.  Defaults to the standard weights (κ=0, no boost).
     memory_id:
         Identifier carried through to the returned :class:`ScoredCandidate`.
     decay_rate:
         Decay rate forwarded to :func:`compute_recency_score`.
+    lexical_score:
+        Fraction of query keywords present in the memory, in [0, 1].
+        Defaults to 0.0 (no boost).
 
     Returns
     -------
@@ -151,12 +171,14 @@ def compute_combined_score(
     rec: float = compute_recency_score(days_since_access, decay_rate=decay_rate)
     freq: float = compute_frequency_score(access_count)
     imp: float = compute_importance_score(importance)
+    lex: float = max(0.0, min(lexical_score, 1.0))
 
     combined: float = (
         weights.alpha * sem
         + weights.beta * rec
         + weights.gamma * freq
         + weights.delta * imp
+        + weights.kappa * lex
     )
 
     return ScoredCandidate(
@@ -166,4 +188,5 @@ def compute_combined_score(
         recency_score=rec,
         frequency_score=freq,
         importance_score=imp,
+        lexical_score=lex,
     )

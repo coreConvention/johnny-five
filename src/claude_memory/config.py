@@ -38,11 +38,16 @@ class MemorySettings(BaseSettings):
         description="Cosine distance below which two memories are near-duplicates.",
     )
 
-    # Multi-signal scoring weights (should sum to 1.0)
+    # Multi-signal scoring weights
+    # alpha+beta+gamma+delta = 1.0; kappa is an additive keyword-boost term
+    # (0.30 default, matches the setting at which mempalace's LoCoMo R@10
+    # jumps from 60% raw to 89% hybrid). When kappa > 0 the combined score
+    # may exceed 1.0 but relative ranking is preserved.
     alpha: float = Field(default=0.45, description="Semantic similarity weight.")
     beta: float = Field(default=0.20, description="Recency weight.")
     gamma: float = Field(default=0.10, description="Frequency weight.")
     delta: float = Field(default=0.25, description="Importance weight.")
+    kappa: float = Field(default=0.30, description="Lexical-overlap (keyword boost) weight.")
 
     # Decay
     decay_rate: float = Field(
