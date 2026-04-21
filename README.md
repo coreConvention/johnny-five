@@ -6,6 +6,8 @@ Persistent memory system for [Claude Code](https://docs.anthropic.com/en/docs/cl
 
 Built on SQLite + FTS5 + [sqlite-vec](https://github.com/asg017/sqlite-vec) with local embeddings via [sentence-transformers](https://www.sbert.net/).
 
+> **Adopting this in your own environment?** Start here: **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — three-tier setup walkthrough covering compaction survival, self-improvement loop hooks, tuning, and operations.
+
 ## Quick Start
 
 ### Docker (recommended)
@@ -158,6 +160,8 @@ pytest --cov=claude_memory
 ## Making It Reliable
 
 Johnny-five works best when Claude knows to use it automatically. The `setup/` directory contains ready-to-use snippets.
+
+> The steps below are the **Tier 1 (minimal)** path — prompt-based hooks that *nudge* Claude to use memory. For **Tier 2 (enforced compaction survival)** and **Tier 3 (self-improvement loop hooks)** — including ready-to-copy scripts for command-type `PreCompact` + `SessionStart` + `UserPromptSubmit` + `PostToolUse` hooks — see **[docs/INTEGRATION.md](docs/INTEGRATION.md)**.
 
 ### 1. Add to your CLAUDE.md
 

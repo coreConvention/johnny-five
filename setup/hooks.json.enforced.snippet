@@ -1,0 +1,53 @@
+{
+  "_comment": "Enforced-tier hook config. See docs/INTEGRATION.md for context. The four scripts referenced here (session-start-recall.sh, precompact-enforce.sh, user-prompt-correction.sh, tool-failure-tracker.js) live in setup/hooks/ — copy them to ~/.claude/hooks/ before enabling this config. This config assumes a docker container named 'johnny-five'; if yours is named differently, edit the scripts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/session-start-recall.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "BEFORE context compaction occurs, preserve session state by calling `memory_store` on johnny-five with type 'project', importance 9, tags ['session-state', 'precompact'], and content that includes: (1) the prompt/plan file path driving this session, (2) current step, (3) completed steps, (4) active blockers/decisions, (5) runtime context (ports, services, env). A command-type hook will verify this ran; if you skipped it, that hook writes a mechanical-floor summary automatically, but your model-authored version is always richer."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/precompact-enforce.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/user-prompt-correction.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/tool-failure-tracker.js"
+          }
+        ]
+      }
+    ]
+  }
+}
