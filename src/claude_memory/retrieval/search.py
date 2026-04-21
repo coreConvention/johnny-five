@@ -11,6 +11,7 @@ Provides two entry points:
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -45,6 +46,7 @@ class SearchResult:
     recency_score: float
     frequency_score: float
     importance_score: float
+    lexical_score: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,7 @@ def _to_search_results(
                 recency_score=sc.recency_score,
                 frequency_score=sc.frequency_score,
                 importance_score=sc.importance_score,
+                lexical_score=sc.lexical_score,
             )
         )
     return results
@@ -105,6 +108,74 @@ def _update_access_stats(
 
 
 # ---------------------------------------------------------------------------
+# Token-budget truncation
+#
+# Callers (notably session-start-recall hooks) often have a tight context
+# budget.  Rather than always returning ``top_k`` full memories, they can
+# pass ``token_budget`` to cap the total content size of the returned list.
+# ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def _get_tiktoken_encoding():
+    """Return a cached tiktoken encoding, or ``None`` if tiktoken isn't installed.
+
+    Uses ``cl100k_base`` as a reasonable approximation of Claude's BPE
+    tokenizer; Anthropic's own tokenizer is proprietary but BPE-family, so
+    tiktoken estimates are close enough for budgeting purposes (typically
+    within 5-10%).
+    """
+    try:
+        import tiktoken  # local import so tiktoken is an optional dependency
+        return tiktoken.get_encoding("cl100k_base")
+    except ImportError:
+        return None
+
+
+def _estimate_tokens(text: str) -> int:
+    """Estimate the token count of *text*.
+
+    Uses tiktoken's cl100k_base encoding when available, falling back to
+    ``ceil(len(text) / 4)`` which tends to overestimate slightly for
+    English prose — the safer direction when enforcing a budget.
+    """
+    if not text:
+        return 0
+    enc = _get_tiktoken_encoding()
+    if enc is not None:
+        return len(enc.encode(text))
+    return (len(text) + 3) // 4
+
+
+def _truncate_to_token_budget(
+    results: list[SearchResult],
+    token_budget: int,
+) -> list[SearchResult]:
+    """Keep results in rank order until the cumulative token cost exceeds the budget.
+
+    Invariants
+    ----------
+    - Always includes the top-1 result, even if it alone exceeds the budget
+      (the caller explicitly asked for results; returning zero would be
+      worse than over-budget-by-one honesty).
+    - Counts only ``memory.content`` (the dominant size contributor); scores
+      and metadata are a rounding-error fraction of the payload.
+    - A non-positive ``token_budget`` disables truncation (returns input).
+    """
+    if token_budget <= 0 or not results:
+        return results
+    kept: list[SearchResult] = []
+    used: int = 0
+    for i, r in enumerate(results):
+        cost: int = _estimate_tokens(r.memory.content or "")
+        if i == 0 or used + cost <= token_budget:
+            kept.append(r)
+            used += cost
+        else:
+            break
+    return kept
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -116,6 +187,7 @@ def search_memories(
     weights: ScoringWeights = ScoringWeights(),
     top_k: int = 15,
     update_access_on_retrieve: bool = True,
+    token_budget: int | None = None,
 ) -> list[SearchResult]:
     """Full multi-signal retrieval pipeline.
 
@@ -125,9 +197,11 @@ def search_memories(
     2. Run vector search, FTS search, and always-load query.
     3. Merge and deduplicate candidates.
     4. Look up full :class:`MemoryRecord` for each candidate.
-    5. Rerank with multi-signal scoring and tier-aware filtering.
-    6. Optionally update access statistics for returned results.
-    7. Return the final :class:`SearchResult` list.
+    5. Rerank with multi-signal scoring, tier-aware filtering, and keyword
+       overlap (boost driven by ``weights.kappa``).
+    6. Optionally truncate to a token budget.
+    7. Optionally update access statistics for returned results.
+    8. Return the final :class:`SearchResult` list.
 
     Parameters
     ----------
@@ -136,22 +210,30 @@ def search_memories(
     encoder:
         The embedding encoder used to vectorise the query.
     query:
-        Natural-language query string.
+        Natural-language query string.  Also forwarded to :func:`rerank`
+        so the keyword-overlap signal can use it.
     project_dir:
         If provided, scopes always-load and FTS results to this project
         directory.
     weights:
-        Multi-signal scoring weights.
+        Multi-signal scoring weights.  Set ``weights.kappa > 0`` to enable
+        the keyword-overlap boost.
     top_k:
-        Maximum number of results to return.
+        Maximum number of results to return (before token-budget truncation).
     update_access_on_retrieve:
         When ``True``, bump access count and last-accessed timestamp for
         every returned memory.
+    token_budget:
+        Optional maximum cumulative token cost of the returned results'
+        ``content``.  Results are iterated in ranking order and the list
+        is truncated at the first candidate that would exceed the budget
+        (top-1 is always included regardless).
 
     Returns
     -------
     list[SearchResult]
-        Up to *top_k* results sorted by descending composite score.
+        Up to *top_k* results sorted by descending composite score, further
+        truncated by *token_budget* if set.
     """
     # 1. Embed
     query_embedding: list[float] = encoder.encode(query)
@@ -174,15 +256,20 @@ def search_memories(
     all_ids: list[str] = [c.memory_id for c in candidates]
     records: dict[str, MemoryRecord] = _lookup_records(conn, all_ids)
 
-    # 5. Rerank
+    # 5. Rerank — pass query so keyword-overlap signal can score candidates.
     scored: list[ScoredCandidate] = rerank(
-        candidates, records, weights=weights, top_k=top_k,
+        candidates, records, weights=weights, top_k=top_k, query=query,
     )
 
     # 6. Build results
     results: list[SearchResult] = _to_search_results(scored, records)
 
-    # 7. Update access stats
+    # 7. Token-budget truncation (before access stats so we only mark what
+    #    the caller actually receives)
+    if token_budget is not None:
+        results = _truncate_to_token_budget(results, token_budget)
+
+    # 8. Update access stats
     if update_access_on_retrieve and results:
         _update_access_stats(conn, results)
 
@@ -196,6 +283,7 @@ def recall_session_memories(
     initial_context: str = "",
     weights: ScoringWeights = ScoringWeights(),
     top_k: int = 20,
+    token_budget: int | None = None,
 ) -> list[SearchResult]:
     """Session-start recall: load baseline context and relevant memories.
 
@@ -293,11 +381,20 @@ def recall_session_memories(
     all_ids: list[str] = [c.memory_id for c in all_candidates]
     records: dict[str, MemoryRecord] = _lookup_records(conn, all_ids)
 
+    # Pass initial_context as the "query" so keyword-overlap can boost
+    # memories mentioning the user's stated focus.  When initial_context is
+    # empty the boost naturally becomes a no-op.
     scored: list[ScoredCandidate] = rerank(
         all_candidates, records, weights=weights, top_k=top_k,
+        query=initial_context if initial_context.strip() else None,
     )
 
     results: list[SearchResult] = _to_search_results(scored, records)
+
+    # Apply token budget BEFORE bumping access stats so we don't inflate
+    # access counts on memories the caller never actually receives.
+    if token_budget is not None:
+        results = _truncate_to_token_budget(results, token_budget)
 
     # Update access stats for recalled memories.
     if results:

@@ -7,3 +7,4 @@ python-ulid>=3.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 numpy>=1.26.0
+tiktoken>=0.8.0

@@ -51,12 +51,17 @@ def _get_deps() -> tuple[sqlite3.Connection, EmbeddingEncoder, MemorySettings]:
 
 
 def _weights_from_settings(settings: MemorySettings) -> ScoringWeights:
-    """Build :class:`ScoringWeights` from the current settings."""
+    """Build :class:`ScoringWeights` from the current settings.
+
+    Includes ``kappa`` (keyword-boost weight). Production default is 0.30;
+    set ``MEMORY_KAPPA=0`` to fall back to pure semantic-only ranking.
+    """
     return ScoringWeights(
         alpha=settings.alpha,
         beta=settings.beta,
         gamma=settings.gamma,
         delta=settings.delta,
+        kappa=settings.kappa,
     )
 
 
@@ -74,6 +79,7 @@ def _search_result_to_dict(result: SearchResult) -> dict:
         "recency_score": round(result.recency_score, 4),
         "frequency_score": round(result.frequency_score, 4),
         "importance_score": round(result.importance_score, 4),
+        "lexical_score": round(result.lexical_score, 4),
         "project_dir": result.memory.project_dir,
         "created_at": result.memory.created_at,
         "updated_at": result.memory.updated_at,
@@ -143,17 +149,27 @@ async def tool_memory_search(
     query: str,
     project_dir: str | None = None,
     top_k: int | None = None,
+    token_budget: int | None = None,
 ) -> dict:
-    """Search memories using multi-signal retrieval.
+    """Search memories using hybrid multi-signal retrieval.
+
+    Combines semantic (vector) + lexical (FTS5 + keyword-overlap boost) +
+    recency + frequency + importance signals. When ``MEMORY_KAPPA > 0``
+    (default 0.30) memories matching the query's keywords get boosted
+    above paraphrase-adjacent neighbours.
 
     Parameters
     ----------
     query:
-        Natural-language search query.
+        Natural-language search query. Also drives the keyword-overlap boost.
     project_dir:
         Optional project directory to scope results.
     top_k:
-        Maximum number of results to return.
+        Maximum number of results before the token-budget cut.
+    token_budget:
+        Optional cap on cumulative token cost of returned ``content``. Useful
+        for fitting recall output into a hook-injected context block.
+        Top-1 result is always returned even if it alone exceeds the budget.
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -167,6 +183,7 @@ async def tool_memory_search(
             project_dir=project_dir,
             weights=weights,
             top_k=effective_top_k,
+            token_budget=token_budget,
         )
         conn.commit()
         return {
@@ -180,20 +197,29 @@ async def tool_memory_recall(
     project_dir: str | None = None,
     initial_context: str = "",
     top_k: int | None = None,
+    token_budget: int | None = None,
 ) -> dict:
     """Session-start recall of relevant memories.
 
-    Loads high-importance memories unconditionally, plus semantically
-    relevant memories if *initial_context* is provided.
+    Loads high-importance always-load memories unconditionally, plus
+    semantically-and-lexically relevant memories if *initial_context* is
+    provided.  When ``MEMORY_KAPPA > 0`` (default 0.30) memories that
+    literally mention the initial_context's keywords rank higher than
+    paraphrase-adjacent neighbours.
 
     Parameters
     ----------
     project_dir:
         Optional project directory to scope results.
     initial_context:
-        Free-text context for semantic bootstrapping.
+        Free-text context for semantic+lexical bootstrapping. An empty
+        string skips the optional ranked search but still loads always-load.
     top_k:
-        Maximum number of results to return.
+        Maximum number of results before the token-budget cut.
+    token_budget:
+        Optional cap on cumulative token cost of returned ``content``.
+        Recommended default for session-start hook injection: 1500.
+        Top-1 result is always returned even if it alone exceeds the budget.
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -207,6 +233,7 @@ async def tool_memory_recall(
             initial_context=initial_context,
             weights=weights,
             top_k=effective_top_k,
+            token_budget=token_budget,
         )
         conn.commit()
         return {
