@@ -25,11 +25,17 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ScoringWeights:
-    """Weights for the retrieval signals.
+    """Weights (and the recency-decay parameter) for the retrieval signals.
 
     The dataclass default sums to 1.0 with ``kappa=0`` so that adding the
     keyword-boost signal is opt-in. When ``kappa > 0`` the composite score
     may exceed 1.0, but relative ranking is preserved.
+
+    ``recency_decay`` is a parameter of the recency signal, not a weight —
+    it controls the per-day decay rate inside :func:`compute_recency_score`.
+    Default 0.01 corresponds to ~69-day half-life. Lower values extend the
+    effective memory lifetime (e.g. 0.002 ≈ 1-year half-life); 0.0 disables
+    recency-based decay entirely in the retrieval pipeline.
     """
 
     alpha: float = 0.45  # semantic similarity
@@ -37,6 +43,7 @@ class ScoringWeights:
     gamma: float = 0.10  # frequency
     delta: float = 0.25  # importance
     kappa: float = 0.0   # lexical overlap (opt-in keyword boost)
+    recency_decay: float = 0.01  # per-day decay rate for the recency signal
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +175,12 @@ def compute_combined_score(
         A fully-populated scored candidate.
     """
     sem: float = max(0.0, min(semantic_similarity, 1.0))
-    rec: float = compute_recency_score(days_since_access, decay_rate=decay_rate)
+    # Prefer the weights-level recency_decay when the caller didn't override
+    # via decay_rate (which defaults to 0.01 — the legacy hardcoded value).
+    effective_decay: float = (
+        weights.recency_decay if decay_rate == 0.01 else decay_rate
+    )
+    rec: float = compute_recency_score(days_since_access, decay_rate=effective_decay)
     freq: float = compute_frequency_score(access_count)
     imp: float = compute_importance_score(importance)
     lex: float = max(0.0, min(lexical_score, 1.0))

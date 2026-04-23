@@ -14,11 +14,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from claude_memory.config import get_settings
 from claude_memory.mcp.tools import (
     tool_memory_aging,
     tool_memory_consolidate,
@@ -281,18 +283,85 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 
 # ---------------------------------------------------------------------------
+# Auto-consolidation background task
+#
+# When ``MEMORY_AUTO_CONSOLIDATE_ENABLED=true`` the server runs a long-lived
+# asyncio task that periodically invokes the aging cycle followed by
+# consolidation. Logs to stderr (never stdout — stdout is the MCP protocol
+# channel on stdio transport). Errors are caught and logged; the loop
+# continues rather than crashing the server. Cancellation during shutdown is
+# handled cleanly.
+# ---------------------------------------------------------------------------
+
+
+def _log_auto_consolidate(msg: str) -> None:
+    """Log auto-consolidate activity to stderr — stdout is MCP-protocol."""
+    print(f"[auto-consolidate] {msg}", file=sys.stderr, flush=True)
+
+
+async def _auto_consolidation_loop(interval_hours: int) -> None:
+    """Runs forever: sleep → aging → consolidation → log → repeat."""
+    # Floor the interval at 60 s to prevent misconfiguration from creating a
+    # tight loop; ceiling is intentionally unbounded.
+    interval_sec: int = max(interval_hours * 3600, 60)
+    _log_auto_consolidate(
+        f"enabled, interval {interval_hours}h (~{interval_sec}s per cycle)"
+    )
+
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+            aging_report = await tool_memory_aging()
+            consol_report = await tool_memory_consolidate()
+            _log_auto_consolidate(
+                f"cycle complete — aging={aging_report} consol={consol_report}"
+            )
+        except asyncio.CancelledError:
+            _log_auto_consolidate("shutting down (cancelled)")
+            raise
+        except Exception as exc:  # defensive — never crash the task
+            _log_auto_consolidate(f"cycle failed: {exc!r}")
+
+
+async def _start_auto_consolidation_if_enabled() -> asyncio.Task | None:
+    """Spawn the background consolidation task if settings say so."""
+    settings = get_settings()
+    if not settings.auto_consolidate_enabled:
+        return None
+    return asyncio.create_task(
+        _auto_consolidation_loop(settings.auto_consolidate_interval_hours),
+        name="auto-consolidation-loop",
+    )
+
+
+async def _stop_auto_consolidation(task: asyncio.Task | None) -> None:
+    """Cancel the background task cleanly."""
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Transport runners
 # ---------------------------------------------------------------------------
 
 
 async def run_stdio() -> None:
     """Run the MCP server over stdio transport."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options(),
-        )
+    bg_task = await _start_auto_consolidation_if_enabled()
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
+    finally:
+        await _stop_auto_consolidation(bg_task)
 
 
 def run_sse(port: int) -> None:
@@ -319,11 +388,23 @@ def run_sse(port: int) -> None:
                 app.create_initialization_options(),
             )
 
+    # Hold the background task handle on a mutable container so the shutdown
+    # callback can reference the same object created at startup.
+    bg_task_ref: dict[str, asyncio.Task | None] = {"task": None}
+
+    async def _on_startup() -> None:
+        bg_task_ref["task"] = await _start_auto_consolidation_if_enabled()
+
+    async def _on_shutdown() -> None:
+        await _stop_auto_consolidation(bg_task_ref["task"])
+
     starlette_app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
+        on_startup=[_on_startup],
+        on_shutdown=[_on_shutdown],
     )
 
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)

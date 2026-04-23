@@ -53,8 +53,10 @@ def _get_deps() -> tuple[sqlite3.Connection, EmbeddingEncoder, MemorySettings]:
 def _weights_from_settings(settings: MemorySettings) -> ScoringWeights:
     """Build :class:`ScoringWeights` from the current settings.
 
-    Includes ``kappa`` (keyword-boost weight). Production default is 0.30;
-    set ``MEMORY_KAPPA=0`` to fall back to pure semantic-only ranking.
+    Includes ``kappa`` (keyword-boost weight, production default 0.30) and
+    ``recency_decay`` (retrieval-time per-day decay rate, default 0.01 ~ 69-day
+    half-life; lower values like 0.002 extend effective memory lifetime toward
+    ~1 year for long-retention deployments).
     """
     return ScoringWeights(
         alpha=settings.alpha,
@@ -62,6 +64,7 @@ def _weights_from_settings(settings: MemorySettings) -> ScoringWeights:
         gamma=settings.gamma,
         delta=settings.delta,
         kappa=settings.kappa,
+        recency_decay=settings.recency_decay,
     )
 
 
