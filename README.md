@@ -201,12 +201,62 @@ All settings are configurable via `MEMORY_*` environment variables:
 | `MEMORY_BETA` | `0.20` | Recency weight |
 | `MEMORY_GAMMA` | `0.10` | Frequency weight |
 | `MEMORY_DELTA` | `0.25` | Importance weight |
-| `MEMORY_DECAY_RATE` | `0.995` | Daily importance decay multiplier |
+| `MEMORY_KAPPA` | `0.30` | Lexical-overlap (keyword boost) weight |
+| `MEMORY_DECAY_RATE` | `0.995` | Daily importance decay multiplier (aging) |
+| `MEMORY_RECENCY_DECAY` | `0.01` | Retrieval-time recency decay rate (per-day). `0.01` ≈ 69-day half-life; `0.002` ≈ 1-year half-life; `0.0` disables recency-based decay |
 | `MEMORY_HOT_ACCESS_THRESHOLD` | `3` | Min accesses in 30 days to stay in hot tier |
 | `MEMORY_WARM_DAYS` | `30` | Days without access before warm demotion |
 | `MEMORY_COLD_DAYS` | `180` | Days without access before cold demotion |
 | `MEMORY_COLD_IMPORTANCE_THRESHOLD` | `3.0` | Max importance for cold demotion |
+| `MEMORY_AUTO_CONSOLIDATE_ENABLED` | `false` | When true, the server runs aging + consolidation automatically on an interval |
+| `MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS` | `168` | Hours between auto-consolidation runs (default = weekly) |
 | `MEMORY_SERVER_PORT` | `8787` | SSE transport port |
+
+### Tuning for long retention (years-scale)
+
+Johnny-five defaults are tuned for months-scale active memory. For multi-year retention, raise the demotion thresholds, slow the decays, and pin anything you never want to lose:
+
+```bash
+docker run -d --name johnny-five -i \
+  -v johnny-five-data:/data \
+  -e MEMORY_RECENCY_DECAY=0.002 \
+  -e MEMORY_DECAY_RATE=0.9995 \
+  -e MEMORY_WARM_DAYS=180 \
+  -e MEMORY_COLD_DAYS=730 \
+  -e MEMORY_COLD_IMPORTANCE_THRESHOLD=1.0 \
+  -e MEMORY_BETA=0.10 \
+  -e MEMORY_KAPPA=0.40 \
+  -e MEMORY_AUTO_CONSOLIDATE_ENABLED=true \
+  -e MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS=168 \
+  johnny-five:latest
+```
+
+Three complementary mechanisms make long retention work:
+
+- **`recency_decay=0.002`** stretches the retrieval-layer recency half-life from ~69 days to ~347 days, so year-old memories still compete fairly with fresh ones in search results.
+- **`warm_days=180, cold_days=730`** keep memories in warm tier for six months instead of one, and cold for two years instead of six months. Together with a lower `cold_importance_threshold=1.0`, only truly low-value stale memories ever get archived.
+- **`auto_consolidate_enabled=true`** runs aging + consolidation every 168 h (weekly). Cold-tier clusters get summarised and the originals archived, keeping the DB size manageable even with 5+ years of accumulated memories.
+
+### The `forever-keep` tag (pinning)
+
+Add `forever-keep` to a memory's `tags` list and it becomes immortal:
+
+- Importance decay skips it (tier + score preserved across aging cycles).
+- Tier transitions skip it (never demoted to warm/cold/archived; also never auto-promoted to hot — it stays wherever you put it).
+- Consolidation skips it (never merged into a summary, never archived as an isolated low-value memory).
+
+Use it for core user preferences, critical workflow rules, or any knowledge the memory system must not discard regardless of access patterns.
+
+```json
+{
+  "content": "User prefers Postgres over Mongo; rationale in RFC-042.",
+  "type": "user",
+  "tags": ["forever-keep", "preferences", "database"],
+  "importance": 9
+}
+```
+
+The tag is a regular string — no schema changes, no reserved enum. Adding or removing it at any time via `memory_update` changes the memory's pinning status on the next aging cycle.
 
 ## Alternative Transports
 

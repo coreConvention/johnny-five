@@ -54,6 +54,15 @@ class MemorySettings(BaseSettings):
         default=0.995,
         description="Daily importance decay multiplier.",
     )
+    recency_decay: float = Field(
+        default=0.01,
+        description=(
+            "Retrieval-time recency decay rate (per day). Default 0.01 gives "
+            "~69-day half-life on the recency signal. Lower values (e.g. 0.002) "
+            "extend effective memory life toward ~1-year half-life; set to 0.0 "
+            "to disable recency-based decay entirely in the retrieval score."
+        ),
+    )
 
     # Tiered lifecycle thresholds
     hot_access_threshold: int = Field(
@@ -71,6 +80,24 @@ class MemorySettings(BaseSettings):
     cold_importance_threshold: float = Field(
         default=3.0,
         description="Maximum importance score for cold-tier demotion.",
+    )
+
+    # Auto-consolidation (background task inside the MCP server)
+    auto_consolidate_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, the MCP server runs a background task that periodically "
+            "executes the aging cycle followed by consolidation. Disabled by "
+            "default so manual invocations of memory_aging / memory_consolidate "
+            "remain the primary path."
+        ),
+    )
+    auto_consolidate_interval_hours: int = Field(
+        default=168,
+        description=(
+            "Interval between auto-consolidation runs, in hours. Default 168 "
+            "(weekly). Only takes effect when auto_consolidate_enabled=True."
+        ),
     )
 
     # Server
