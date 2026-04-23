@@ -1,0 +1,14 @@
+{
+  "kappa": 0.0,
+  "top_k": 10,
+  "total_items": 250,
+  "avg_recall": 0.9286666666666666,
+  "per_category": {
+    "User Facts": 0.98,
+    "Assistant Facts": 1.0,
+    "Abstention": 0.91,
+    "Preferences": 0.86,
+    "Implicit Connections": 0.8933333333333333
+  },
+  "elapsed_sec": 79.94603872299194
+}
