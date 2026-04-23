@@ -1,0 +1,15 @@
+{
+  "kappa": 0.0,
+  "top_k": 10,
+  "granularity": "session",
+  "total_qa": 1986,
+  "avg_recall": 0.6028744864847584,
+  "per_category": {
+    "Temporal": 0.6921079958463136,
+    "Temporal-inference": 0.4604414682539682,
+    "Single-hop": 0.5902116402116402,
+    "Open-domain": 0.5808561236623068,
+    "Adversarial": 0.6188340807174888
+  },
+  "elapsed_sec": 23.3542377948761
+}
