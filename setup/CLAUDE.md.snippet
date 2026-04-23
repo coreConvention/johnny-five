@@ -14,6 +14,22 @@ Store memories proactively — don't wait to be asked:
 
 Always include `project_dir` when the memory is project-specific. Always include relevant `tags` for categorization.
 
+### The `forever-keep` tag (use sparingly)
+
+Add `"forever-keep"` to the `tags` list to **pin** a memory so it survives the aging system:
+
+- Importance never decays.
+- Tier never demotes (stays where you put it, typically `hot`).
+- Consolidation skips it — never merged into a summary, never auto-archived.
+
+Use **only** for:
+- Core user preferences that define how you should behave ("always respond in British English")
+- Critical workflow invariants the user has emphasised (security rules, architectural constraints)
+- Expensive-to-rediscover gotchas (postmortems, hard-won lessons)
+- Reference pointers the user must never lose (production URLs, ticket systems, dashboards)
+
+Rule of thumb: if losing this memory would cost the user real time or trust, tag it `forever-keep`. If it's just "nice to have", don't — let the aging system manage it.
+
 ### When to Search/Recall
 
 - **Session start**: Call `memory_recall` with `project_dir` and a brief `initial_context` describing the work ahead

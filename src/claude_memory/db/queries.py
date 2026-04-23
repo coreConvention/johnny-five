@@ -360,6 +360,11 @@ def bulk_update_importance(
     Each qualifying memory's importance is multiplied by *decay_rate* (e.g.
     0.995), clamped to a minimum of 0.1.
 
+    Memories tagged ``forever-keep`` are exempted — their importance is
+    preserved across aging cycles. This is the pinning mechanism for
+    knowledge the user never wants to lose (e.g. core preferences, critical
+    gotchas).
+
     Returns the number of rows affected.
     """
     today: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -370,6 +375,7 @@ def bulk_update_importance(
             updated_at = ?
         WHERE tier != 'archived'
           AND date(last_accessed) < ?
+          AND (tags IS NULL OR tags NOT LIKE '%"forever-keep"%')
         """,
         (decay_rate, _now_iso(), today),
     )
@@ -385,18 +391,27 @@ def update_tiers(
 ) -> tuple[int, int, int]:
     """Re-evaluate tier placement for every non-archived memory.
 
+    Memories tagged ``forever-keep`` are pinned: tier-update SQL skips them,
+    so they neither promote nor demote. Combine with the importance-decay
+    exemption in :func:`bulk_update_importance` and these memories are
+    effectively immortal.
+
     Returns ``(promoted_to_hot, demoted_to_warm, demoted_to_cold)``.
     """
     now: str = _now_iso()
+    # Shared exclusion: applied to every UPDATE in this function so
+    # forever-keep memories never move tier.
+    _pinned_exclusion: str = "(tags IS NULL OR tags NOT LIKE '%\"forever-keep\"%')"
 
     # Promote to hot: frequently accessed in the recent window.
     cur = conn.execute(
-        """\
+        f"""\
         UPDATE memories
         SET tier = 'hot', updated_at = ?
         WHERE tier != 'archived'
           AND access_count >= ?
           AND julianday('now') - julianday(last_accessed) <= ?
+          AND {_pinned_exclusion}
         """,
         (now, hot_access_threshold, warm_days),
     )
@@ -404,7 +419,7 @@ def update_tiers(
 
     # Demote from hot to warm: not frequently accessed.
     cur = conn.execute(
-        """\
+        f"""\
         UPDATE memories
         SET tier = 'warm', updated_at = ?
         WHERE tier = 'hot'
@@ -412,6 +427,7 @@ def update_tiers(
               access_count < ?
               OR julianday('now') - julianday(last_accessed) > ?
           )
+          AND {_pinned_exclusion}
         """,
         (now, hot_access_threshold, warm_days),
     )
@@ -419,12 +435,13 @@ def update_tiers(
 
     # Demote from warm to cold: stale and low importance.
     cur = conn.execute(
-        """\
+        f"""\
         UPDATE memories
         SET tier = 'cold', updated_at = ?
         WHERE tier = 'warm'
           AND julianday('now') - julianday(last_accessed) > ?
           AND importance <= ?
+          AND {_pinned_exclusion}
         """,
         (now, warm_days, cold_importance_threshold),
     )
@@ -432,23 +449,25 @@ def update_tiers(
 
     # Promote cold back to warm if importance has risen.
     conn.execute(
-        """\
+        f"""\
         UPDATE memories
         SET tier = 'warm', updated_at = ?
         WHERE tier = 'cold'
           AND importance > ?
+          AND {_pinned_exclusion}
         """,
         (now, cold_importance_threshold),
     )
 
     # Demote cold to archived if very stale.
     conn.execute(
-        """\
+        f"""\
         UPDATE memories
         SET tier = 'archived', updated_at = ?
         WHERE tier = 'cold'
           AND julianday('now') - julianday(last_accessed) > ?
           AND importance <= ?
+          AND {_pinned_exclusion}
         """,
         (now, cold_days, cold_importance_threshold),
     )
