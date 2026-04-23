@@ -99,6 +99,93 @@ hot  →  warm  →  cold  →  archived
 
 When storing a memory, the system checks for near-duplicates (cosine distance < 0.15). If found, it merges the new content into the existing memory, bumps importance, re-embeds, and returns `"action": "merged"` instead of `"inserted"`.
 
+## Benchmarks
+
+johnny-five's retrieval pipeline is measured against three published memory benchmarks using the same datasets and methodology mempalace reports their numbers on. Full methodology, per-category breakdowns, and reproducibility commands live in [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md).
+
+| Benchmark | Metric | johnny-five κ=0 | **johnny-five κ=0.30** | mempalace (published) |
+|---|---|---|---|---|
+| LoCoMo (1986 Qs, session granularity) | R@10 | 60.29% | **85.17%** | 60.3% raw / 88.9% hybrid v5 |
+| ConvoMem (~250 items, 5 cats loaded) | Avg recall | 92.87% | **92.93%** | 92.9% |
+| MemBench (8500 items, 10 cats, movie) | R@5 | — | **81.82%** | 80.3% |
+
+Headline takeaways:
+
+- **Raw pipelines match exactly.** johnny-five at κ=0 hits mempalace's published raw numbers on both LoCoMo (60.29 vs 60.3) and ConvoMem (92.87 vs 92.9) — validates that our retrieval pipeline, embedding model (`all-MiniLM-L6-v2`), and recall metric are semantically equivalent to their reference.
+- **The κ keyword-boost delivers +24.88pp on session-granularity retrieval** (LoCoMo), basically zero on message/turn-granularity (ConvoMem). Makes sense: keyword overlap rescues entity mentions inside multi-turn session documents, adds little when each doc is already one sentence.
+- **Beats mempalace on MemBench** by 1.5pp overall (81.82% vs 80.3%), winning on 7 of 10 categories including the hardest (noisy, post_processing, conditional, highlevel_rec).
+
+## johnny-five vs mempalace
+
+Both are open-source, MIT-licensed, local-first memory systems for LLM agents. They solve overlapping problems with different bets. This section is the honest comparison so you can pick the right one for your use case.
+
+### At a glance
+
+| | **johnny-five** | **mempalace** |
+|---|---|---|
+| Primary target | Claude Code (MCP stdio) | Claude Code, Codex, general LLM agents |
+| MCP tool surface | **8 tools** (store / search / recall / update / forget / aging / consolidate / stats) | 29 tools (palace + drawer + wing + room + hall + kg + diary + tunnel operations) |
+| Store-call semantics | One `memory_store` with `type`, `tags`, `importance`, `metadata` | Separate `add_drawer` / `diary_write` / `kg_add` per content class |
+| Storage format | Digests, typically <500 chars (model-authored) | Verbatim chunks, 800 chars (no paraphrase) |
+| Retrieval signals | α·sem + β·rec + γ·freq + δ·imp + κ·lex (5 signals, env-var configurable) | semantic + keyword + temporal + name + quoted-phrase boosts (hybrid v5) |
+| Optional LLM rerank | Not implemented (clean extension point in `rerank()`) | Haiku/Sonnet rerank → near-100% on LongMemEval |
+| DB engine | SQLite + sqlite-vec + FTS5 (one file, one volume) | ChromaDB |
+| Ontology | Flat `project_dir` scoping + free-form tags | Wings / Rooms / Halls / drawers + knowledge-graph nodes |
+| Dedup | Automatic at write (cosine-similarity merge) | Explicit `check_duplicate` tool |
+| Persistence | Single docker volume (`johnny-five-data`) | ChromaDB store + KG SQLite |
+| LLM calls by default | Zero | Zero for core path; optional for rerank/palace |
+
+### Choose johnny-five if …
+
+- You live primarily in Claude Code and want memory to *disappear* into the workflow — small tool surface = small schema overhead in Claude's context window.
+- You want short, model-authored memories (corrections, lessons, preferences) rather than archiving full conversation transcripts.
+- You care about dedup-on-write because you'll be storing many similar corrections over time.
+- You want a one-container deployment (the johnny-five image is the runtime; the named volume is the database).
+- You'd rather tune five weights via `MEMORY_*` env vars than navigate a Wing/Room/Hall ontology.
+
+### Choose mempalace if …
+
+- You want the strongest possible retrieval numbers and are willing to pay for an optional LLM rerank (~$0.001/query with Haiku).
+- You need verbatim conversation preservation — every word of every session stays searchable, nothing discarded.
+- You work across multiple LLM frameworks (Claude Code, Codex, Anthropic SDK, Mastra, etc.) and want one memory server under all of them.
+- You want rich cross-domain navigation — tunnels between wings, knowledge-graph relations with validity windows, diary summaries.
+- You're comfortable with a larger tool surface (29 tools) and the spatial metaphor (wings/rooms/halls) that mempalace's literature leans on.
+
+### Pros and cons, explicitly
+
+**johnny-five strengths**
+- **Low token cost in context.** 8-tool schemas × short descriptions keep Claude's token budget free for the actual work. Mempalace's 29 tools are individually small but stack up in every system prompt.
+- **Simple type taxonomy** (`user | feedback | project | reference | lesson`). Claude doesn't have to decide between drawer / diary / kg / wing / room at every write.
+- **Automatic dedup at store time.** No separate round-trip tool; near-duplicates merge transparently and bump importance.
+- **Env-var weight tuning.** Every scoring knob is a `MEMORY_*` env var — no code changes needed to experiment with signal weights.
+- **Benchmark-verified against mempalace's own reference.** Raw pipelines match exactly; +1.5pp over mempalace on MemBench; within 4pp of their hybrid-v5 on LoCoMo with only one of their three boost signals ported.
+
+**johnny-five limitations**
+- **No LLM rerank** (yet). Mempalace's +0.6–5pp jumps on LongMemEval/LoCoMo with Haiku rerank are out of reach until someone implements it in `rerank()`.
+- **No quoted-phrase or person-name boosts.** These would close most of the ~3.7pp gap to mempalace hybrid v5 on LoCoMo.
+- **No verbatim storage.** If you need raw transcripts searchable, johnny-five is the wrong tool — memories are compressed to a digest on write. (Clean extension point: the `summary` column is unused today; a `raw_transcript` column + separate retrieval table would layer on.)
+- **No cross-project navigation.** Memories are strictly scoped by `project_dir`; there's no equivalent to mempalace's wing tunnels.
+- **No knowledge graph.** Entities and relations live as free-form tags — no validity windows, no explicit timeline, no graph queries.
+
+**mempalace strengths**
+- **Highest published retrieval scores.** 96.6% raw / 99.4–100% with rerank on LongMemEval; 88.9% hybrid v5 on LoCoMo without rerank.
+- **Verbatim text preserved.** No information ever discarded — you can answer any question about *any* past conversation word, not just what a model decided to remember.
+- **Richer architecture surface.** Palace/rooms/wings/tunnels, knowledge graph, diary summaries, agent directories — all addressable as MCP tools.
+- **LLM rerank path.** Pay per query for near-perfect retrieval when you need it.
+- **Framework-agnostic.** Not tied to Claude Code's MCP stdio — works under Codex, Anthropic SDK directly, local/ollama backends.
+
+**mempalace limitations**
+- **Larger cognitive + token footprint.** 29 tools × schemas in Claude's context is a real cost, especially on smaller models; simple use cases pay for features they don't use.
+- **Storage grows fast.** Verbatim preservation means one long conversation = many drawers. On a laptop with years of sessions this adds up meaningfully.
+- **Ontology tax.** Every write implicitly picks a wing/room/hall; model spends attention on that at every store call.
+- **No dedup on write.** Near-identical reflections accumulate unless explicitly pruned; a separate `check_duplicate` tool exists but requires the caller to use it.
+
+### When either is fine
+
+If you're getting started with persistent memory for Claude Code and don't yet know which features matter: **start with johnny-five**, because the minimal surface gets you to "it works" fastest. If you find yourself wanting verbatim recall, LLM rerank, or a knowledge graph, mempalace is the natural next step — and the mental model carries over because both use semantic similarity + keyword boost as their core retrieval.
+
+Neither is the wrong answer. They're products of different hypotheses about what costs most — schema overhead versus information loss — and both are right about their own hypothesis.
+
 ## Configuration
 
 All settings are configurable via `MEMORY_*` environment variables:
