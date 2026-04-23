@@ -182,10 +182,14 @@ All scoring weights are `MEMORY_*` env vars. The defaults below are sensible for
 | `MEMORY_GAMMA` | `0.10` | Frequency (access count) | Rarely. |
 | `MEMORY_DELTA` | `0.25` | Importance | Higher (0.35) if you're diligent about setting importance correctly. |
 | `MEMORY_KAPPA` | `0.30` | Lexical overlap (keyword boost) | Higher (0.40–0.50) for entity-heavy queries ("what's the name of that service?"). Lower (0.15) if you see too many false-keyword-match surface. Set to 0 to disable. |
+| `MEMORY_RECENCY_DECAY` | `0.01` | Retrieval-time recency half-life. Default `0.01` ≈ 69-day half-life. | `0.002` (~1-year half-life) for long retention. `0.0` disables recency decay entirely. |
+| `MEMORY_DECAY_RATE` | `0.995` | Daily importance-decay multiplier (aging cycle, not retrieval) | `0.9995` for slow years-scale decay. `1.0` disables. |
 | `MEMORY_DEDUP_THRESHOLD` | `0.15` | Cosine distance under which a new memory merges into a duplicate | Lower (0.08) for aggressive dedup; higher (0.25) to keep near-duplicates separate. |
-| `MEMORY_WARM_DAYS` | `30` | Days of inactivity before a memory demotes to warm | Shorter (14) if your DB grows fast. |
-| `MEMORY_COLD_DAYS` | `180` | Warm → cold | Shorter (90) if you want aggressive consolidation. |
-| `MEMORY_COLD_IMPORTANCE_THRESHOLD` | `3.0` | Max importance for cold demotion | Leave alone unless you see low-importance memories sticking to warm. |
+| `MEMORY_WARM_DAYS` | `30` | Days of inactivity before a memory demotes to warm | Shorter (14) if your DB grows fast. `180` for multi-month active window. |
+| `MEMORY_COLD_DAYS` | `180` | Warm → cold | Shorter (90) for aggressive consolidation. `730` for multi-year retention. |
+| `MEMORY_COLD_IMPORTANCE_THRESHOLD` | `3.0` | Max importance for cold demotion | Lower (`1.0`) to protect more memories from cold. |
+| `MEMORY_AUTO_CONSOLIDATE_ENABLED` | `false` | When true, server runs aging + consolidation automatically on an interval | `true` to remove the manual cron. |
+| `MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS` | `168` | Hours between auto-consolidation cycles | `168` = weekly (recommended). Floor enforced at 60 s. |
 
 Override any of them at container run time:
 ```bash
@@ -208,6 +212,83 @@ await tool_memory_recall(
 )
 ```
 Top-1 is always included even if it alone exceeds the budget (otherwise "did any memory match?" becomes ambiguous). Truncation happens at the first result that would exceed. Tiktoken-based estimation with a `len/4` fallback when tiktoken isn't installed.
+
+### Long retention (years-scale)
+
+Johnny-five's defaults are tuned for months-scale active memory. For multi-year retention, combine four knobs and enable auto-consolidation:
+
+```bash
+docker run -d --name johnny-five -i \
+  -v johnny-five-data:/data \
+  -e MEMORY_RECENCY_DECAY=0.002 \
+  -e MEMORY_DECAY_RATE=0.9995 \
+  -e MEMORY_WARM_DAYS=180 \
+  -e MEMORY_COLD_DAYS=730 \
+  -e MEMORY_COLD_IMPORTANCE_THRESHOLD=1.0 \
+  -e MEMORY_BETA=0.10 \
+  -e MEMORY_KAPPA=0.40 \
+  -e MEMORY_AUTO_CONSOLIDATE_ENABLED=true \
+  -e MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS=168 \
+  johnny-five:latest
+```
+
+Why each knob matters for long retention:
+
+- **`MEMORY_RECENCY_DECAY=0.002`** stretches the retrieval-layer recency half-life from ~69 days to ~347 days. Year-old memories compete fairly with fresh ones in search results.
+- **`MEMORY_DECAY_RATE=0.9995`** slows per-day importance decay from ~0.5% to ~0.05%. A memory stored at importance 8 takes ~4 years to decay below 3.0 rather than ~4 months.
+- **`MEMORY_WARM_DAYS=180` + `MEMORY_COLD_DAYS=730`** extends the active-memory window to 6 months and cold demotion to 2 years.
+- **`MEMORY_COLD_IMPORTANCE_THRESHOLD=1.0`** protects everything above very-low importance from cold demotion.
+- **`MEMORY_BETA=0.10`** (from 0.20) lowers the retrieval weight on recency so older stable knowledge ranks alongside new corrections instead of always behind.
+- **`MEMORY_KAPPA=0.40`** (from 0.30) bumps keyword-overlap weight — with more memories in the pool, literal keyword match becomes a more valuable rescue signal against semantic-neighbour noise.
+- **Auto-consolidation weekly** keeps the cold-tier cluster count manageable without requiring an external cron.
+
+### The `forever-keep` tag (pinning)
+
+Add `forever-keep` to a memory's `tags` list and it becomes immortal:
+
+- **Importance decay skips it** — importance is preserved across every aging cycle, no matter how many days without access.
+- **Tier transitions skip it** — a pinned memory never demotes to warm/cold/archived and is never auto-promoted to hot either. It stays in whatever tier you put it in (usually `hot`).
+- **Consolidation skips it** — never merged into a summary, never archived as an "isolated low-value" memory.
+
+Store example:
+
+```json
+{
+  "content": "User prefers Postgres over Mongo. Rationale: we lost six weeks to Mongo's lack of transactions on the old payments service. Never again.",
+  "type": "user",
+  "tags": ["forever-keep", "preferences", "database", "postmortem"],
+  "importance": 9
+}
+```
+
+`forever-keep` is a regular string tag — no schema changes, no reserved enum, no special tool. Add or remove it at any time via `memory_update`; the change takes effect on the next aging cycle. Use it sparingly for:
+
+- Core user preferences that define how the assistant should behave
+- Critical workflow rules or invariants (security rules, architectural constraints)
+- Expensive-to-rediscover gotchas (postmortems, subtle bugs)
+- Reference pointers the system must never forget (production URLs, ticket systems, dashboards)
+
+Don't use it as a substitute for high importance on every memory — that would defeat the whole aging system. Treat it as the "break glass" tag for the tiny fraction of memories that are load-bearing for correct behaviour.
+
+### Auto-consolidation scheduler
+
+With `MEMORY_AUTO_CONSOLIDATE_ENABLED=true` the MCP server spawns a background asyncio task on startup that runs:
+
+```
+while alive:
+    sleep(interval_hours * 3600)
+    tool_memory_aging()       # decay + tier transitions
+    tool_memory_consolidate() # cluster cold, summarise, archive originals
+```
+
+Logs to **stderr** (not stdout — stdout is the MCP protocol channel on stdio transport). Errors are caught and reported; the loop keeps running. Cancellation during shutdown is handled cleanly via asyncio's `CancelledError` protocol.
+
+The task uses its own per-iteration DB connection via the existing `tool_memory_aging` / `tool_memory_consolidate` handlers; SQLite WAL mode handles the occasional concurrent-writer case gracefully. In practice, consolidation runs for 1–10 seconds once a week, so collision with a user memory_store call is vanishingly rare.
+
+When to disable auto-consolidation:
+- You prefer explicit, visible runs — call `memory_consolidate` manually whenever the DB gets large.
+- Your deployment runs under a container orchestrator that restarts frequently enough that the background loop rarely hits its interval.
+- You want predictable cost — auto-consolidation's embedding compute runs on your CPU at weekly intervals regardless of activity.
 
 ---
 

@@ -233,7 +233,25 @@ def run_consolidation(
     ConsolidationReport
         Statistics about the consolidation run.
     """
-    cold_memories: list[MemoryRecord] = get_memories_by_tier(conn, tier="cold")
+    cold_memories_all: list[MemoryRecord] = get_memories_by_tier(conn, tier="cold")
+
+    # Exclude forever-keep memories from consolidation. Even if they landed
+    # in cold (e.g. the tag was added AFTER the memory aged in), we refuse
+    # to merge or archive them — their content must stay addressable as-is.
+    def _is_pinned(memory: MemoryRecord) -> bool:
+        tags = memory.tags
+        if isinstance(tags, list):
+            return "forever-keep" in tags
+        if isinstance(tags, str) and tags:
+            try:
+                return "forever-keep" in json.loads(tags)
+            except Exception:
+                return False
+        return False
+
+    cold_memories: list[MemoryRecord] = [
+        m for m in cold_memories_all if not _is_pinned(m)
+    ]
 
     if not cold_memories:
         return ConsolidationReport(
