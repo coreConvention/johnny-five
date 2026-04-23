@@ -39,8 +39,26 @@ def get_connection(
     conn: sqlite3.Connection = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
+    # Enable SQLite extension loading. On many Python builds (Windows in
+    # particular) this is disabled by default, so ``sqlite_vec.load`` fails
+    # with ``OperationalError: not authorized`` without this call. We toggle
+    # it back off after loading the extension for defence in depth — once
+    # sqlite-vec is loaded into this connection, no further extension loads
+    # are expected or allowed.
+    try:
+        conn.enable_load_extension(True)
+    except (AttributeError, sqlite3.NotSupportedError):
+        # Python compiled without extension support; the next call will
+        # raise a clearer error.
+        pass
+
     # Load the sqlite-vec extension before any DDL that references vec0.
     sqlite_vec.load(conn)
+
+    try:
+        conn.enable_load_extension(False)
+    except (AttributeError, sqlite3.NotSupportedError):
+        pass
 
     # Performance / safety pragmas.
     conn.execute("PRAGMA journal_mode=WAL")
