@@ -6,7 +6,58 @@ Persistent memory system for [Claude Code](https://docs.anthropic.com/en/docs/cl
 
 Built on SQLite + FTS5 + [sqlite-vec](https://github.com/asg017/sqlite-vec) with local embeddings via [sentence-transformers](https://www.sbert.net/).
 
-> **Adopting this in your own environment?** Start here: **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — three-tier setup walkthrough covering compaction survival, self-improvement loop hooks, tuning, and operations.
+> **Adopting this in your own environment?**
+>
+> - **The fast path — let Claude do it:** clone this repo, open Claude Code in the clone, and run [`/integrate`](.claude/commands/integrate.md). It detects what's already set up, asks two questions, and wires the rest end to end (Docker container, hooks, global CLAUDE.md discipline rules, optional per-project wiring, verification). Idempotent and re-run-safe.
+> - **Don't have it cloned yet?** Use the [Canned Claude prompt](#canned-claude-prompt) below — paste into a fresh Claude Code session and it'll handle the clone + setup.
+> - **Want to read first or set up by hand?** [`docs/INTEGRATION.md`](docs/INTEGRATION.md) is the three-tier walkthrough; [`docs/BEST_PRACTICES.md`](docs/BEST_PRACTICES.md) covers the discipline rules with citations.
+
+## Documentation
+
+| Doc | Audience | Purpose |
+|---|---|---|
+| [`docs/INTEGRATION.md`](docs/INTEGRATION.md) | Humans | Three-tier setup walkthrough (architectural reference) |
+| [`docs/CLAUDE_MD_SNIPPETS.md`](docs/CLAUDE_MD_SNIPPETS.md) | `/integrate` + humans | Exact marker-bracketed blocks for global + project CLAUDE.md |
+| [`docs/BEST_PRACTICES.md`](docs/BEST_PRACTICES.md) | Humans | Discipline rules with research citations (MemGPT, Generative Agents, MCP spec) |
+| [`docs/BACKUP_AND_RESTORE.md`](docs/BACKUP_AND_RESTORE.md) | Operators | Volume snapshot, JSON export/import, scheduled, disaster recovery |
+| [`docs/AGENT_NOTES.md`](docs/AGENT_NOTES.md) | Future Claude sessions | Gotchas, failure modes, what NOT to do (grep-bait) |
+| [`.claude/commands/integrate.md`](.claude/commands/integrate.md) | Claude (via `/integrate`) | Self-contained runbook — state detection, install, verify |
+| [`setup/cron/README.md`](setup/cron/README.md) | Operators | Scheduled-backup examples for Linux / macOS / Windows |
+
+## Canned Claude prompt
+
+Paste either prompt into a fresh Claude Code session to bootstrap the integration. The session does **not** need to be inside the johnny-five repo.
+
+**Prompt A — full setup (clone + integrate):**
+
+```text
+Set up the johnny-five persistent memory MCP server for my Claude Code environment.
+
+1. Clone https://github.com/coreConvention/johnny-five.git into a directory I'll specify
+   (ask me where via AskUserQuestion; default to ~/johnny-five). Skip cloning if it
+   already exists at that path.
+2. cd into the cloned directory.
+3. Read .claude/commands/integrate.md completely before acting. Then execute it
+   end to end: state detection → ask scope (global / project / both) → install
+   Docker container, hooks, MCP wiring, global CLAUDE.md snippet → verification suite.
+4. Use AskUserQuestion at every decision point. Don't skip the verification step.
+5. After integration finishes, point me at docs/BEST_PRACTICES.md and
+   docs/BACKUP_AND_RESTORE.md for next steps.
+
+Prerequisites I'll have ready: Docker installed and running. If anything else is
+missing, tell me what to install — don't try to install system-level tooling yourself.
+```
+
+**Prompt B — already cloned, just run /integrate:**
+
+```text
+I have the johnny-five repo cloned at <path>. Open it and run the /integrate
+slash command. Read .claude/commands/integrate.md fully before acting, ask me
+the scope question (global / project / both), then execute end to end with
+verification. Use AskUserQuestion for any forks.
+```
+
+Either prompt assumes Claude Code is running and Docker is installed. The integration touches `~/.claude/CLAUDE.md`, `~/.claude/settings.json`, `~/.claude/mcp.json`, and `~/.claude/hooks/` — review the diff Claude proposes before approving file writes.
 
 ## Quick Start
 
@@ -302,6 +353,8 @@ Johnny-five works best when Claude knows to use it automatically. The `setup/` d
 
 ### 1. Add to your CLAUDE.md
 
+> **For the full discipline ruleset** (search-first loop, scoping invariants, importance scoring conventions, failure modes), use the comprehensive snippet in **[`docs/CLAUDE_MD_SNIPPETS.md`](docs/CLAUDE_MD_SNIPPETS.md)**. The `setup/CLAUDE.md.snippet` file referenced below is the lighter Tier-1 version — fine to start, but `CLAUDE_MD_SNIPPETS.md` is what makes johnny-five actually useful in practice.
+
 Copy `setup/CLAUDE.md.snippet` into your global `~/.claude/CLAUDE.md` (applies to all projects) or a project-specific `CLAUDE.md`. This tells Claude when to store, search, and recall memories.
 
 **Linux/macOS:**
@@ -377,9 +430,20 @@ docker run -d --name johnny-five \
 
 ## Backup & Restore
 
+> The full operations runbook — including JSON export/import, scheduled backups, encryption, and disaster recovery — lives in **[`docs/BACKUP_AND_RESTORE.md`](docs/BACKUP_AND_RESTORE.md)**. Scheduled-backup examples for cron / systemd / launchd / Task Scheduler: **[`setup/cron/README.md`](setup/cron/README.md)**. The recipes below are the quick-reference subset.
+
 The SQLite database lives in a Docker named volume (`johnny-five-data`).
 
 ### Create a backup
+
+Quickest path — use the bundled script:
+
+```bash
+./setup/scripts/backup-volume.sh                   # writes to ./j5-backups/
+./setup/scripts/backup-volume.sh ~/j5-backups      # custom target
+```
+
+Or manually:
 
 ```bash
 docker run --rm -v johnny-five-data:/data -v "$(pwd)":/backup alpine \
