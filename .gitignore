@@ -29,3 +29,9 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+
+# Claude Code per-user settings (commands/agents/skills are versioned; settings.local.json is not)
+.claude/settings.local.json
+
+# Volume backups
+j5-backups/
