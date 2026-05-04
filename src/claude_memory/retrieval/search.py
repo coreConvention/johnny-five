@@ -12,6 +12,9 @@ Provides two entry points:
 from __future__ import annotations
 
 import functools
+import json
+import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -108,6 +111,115 @@ def _update_access_stats(
 
 
 # ---------------------------------------------------------------------------
+# Tag filter (issue #8)
+#
+# Strict AND filter — only memories possessing ALL required_tags survive.
+# Runs after record lookup but before reranker so that token_budget (issue #10)
+# and top_k limits apply to the already-filtered set, not the full candidate pool.
+# ---------------------------------------------------------------------------
+
+def _parse_tags(raw: list[str] | str | None) -> list[str]:
+    """Return a normalised tag list regardless of how tags are stored.
+
+    MemoryRecord.tags may be a Python list (when constructed in tests or after
+    a fresh query) or a JSON-encoded string (as SQLite stores it).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
+def _apply_tag_filter(
+    records: dict[str, MemoryRecord],
+    required_tags: list[str] | None,
+) -> dict[str, MemoryRecord]:
+    """Return the subset of *records* where every required tag is present.
+
+    When *required_tags* is ``None`` or empty, returns *records* unchanged.
+    Tags on the record may be a Python list or a JSON-encoded string — both
+    are handled via :func:`_parse_tags`.
+    """
+    if not required_tags:
+        return records
+    required = set(required_tags)  # set() deduplicates — ["a", "a"] behaves as ["a"]
+    return {
+        mid: record
+        for mid, record in records.items()
+        if required.issubset(set(_parse_tags(record.tags)))
+    }
+
+
+# ---------------------------------------------------------------------------
+# Project scope enforcement (issue #9)
+#
+# Memories with an explicit project:<X> tag that doesn't match the caller's
+# project are filtered out, UNLESS the memory also has scope:cross-project.
+# Memories with no project:<X> tag are always kept.
+# ---------------------------------------------------------------------------
+
+
+def _derive_project_id(project_dir: str | None) -> str | None:
+    """Normalize a project directory path to a tag-compatible project identifier.
+
+    Examples
+    --------
+    ``Z:/Personal/w31rd.com`` → ``w31rd-com``
+    ``Z:/Personal/Hac``       → ``hac``
+    ``Z:/Personal/johnnyFive`` → ``johnnyfive``
+    """
+    if not project_dir:
+        return None
+    name = os.path.basename(project_dir.rstrip("/\\"))
+    if not name:
+        return None
+    # Lowercase; replace dots, underscores and spaces with hyphens; strip fringe hyphens.
+    name = re.sub(r"[\s._]+", "-", name.lower()).strip("-")
+    return name or None
+
+
+def _apply_project_scope_filter(
+    records: dict[str, MemoryRecord],
+    project_dir: str | None,
+) -> dict[str, MemoryRecord]:
+    """Filter out memories that explicitly belong to a different project.
+
+    A memory is removed when ALL of the following hold:
+    - It carries at least one ``project:<X>`` tag.
+    - None of those tags matches ``project:<caller_project_id>``.
+    - It does NOT carry ``scope:cross-project``.
+
+    Memories with no ``project:<X>`` tag are always kept.
+    When *project_dir* is ``None``, no filtering is applied.
+    """
+    project_id = _derive_project_id(project_dir)
+    if not project_id:
+        return records
+
+    caller_tag = f"project:{project_id}"
+    filtered: dict[str, MemoryRecord] = {}
+    for mid, record in records.items():
+        tags = set(_parse_tags(record.tags))
+        project_tags = {t for t in tags if t.startswith("project:")}
+        if not project_tags:
+            filtered[mid] = record  # no explicit project claim → keep
+            continue
+        if caller_tag in project_tags:
+            filtered[mid] = record  # matches caller → keep
+            continue
+        if "scope:cross-project" in tags:
+            filtered[mid] = record  # explicitly cross-project → keep
+            continue
+        # Has project:<other> tag and no cross-project scope → exclude
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Token-budget truncation
 #
 # Callers (notably session-start-recall hooks) often have a tight context
@@ -188,6 +300,8 @@ def search_memories(
     top_k: int = 15,
     update_access_on_retrieve: bool = True,
     token_budget: int | None = None,
+    tags: list[str] | None = None,
+    enforce_project_scope: bool = True,
 ) -> list[SearchResult]:
     """Full multi-signal retrieval pipeline.
 
@@ -228,6 +342,16 @@ def search_memories(
         ``content``.  Results are iterated in ranking order and the list
         is truncated at the first candidate that would exceed the budget
         (top-1 is always included regardless).
+    tags:
+        Optional list of tags that ALL returned memories must possess (strict
+        AND filter).  Applied after record lookup but before reranker, so
+        token_budget and top_k limits apply to the already-filtered candidate
+        set (resolves issue #10 ordering).
+    enforce_project_scope:
+        When ``True`` (default) and *project_dir* is provided, memories bearing
+        a ``project:<other>`` tag that doesn't match the caller's project are
+        excluded unless they carry ``scope:cross-project``.  Set to ``False``
+        for cross-project diagnostic queries.
 
     Returns
     -------
@@ -255,6 +379,18 @@ def search_memories(
     # 4. Lookup
     all_ids: list[str] = [c.memory_id for c in candidates]
     records: dict[str, MemoryRecord] = _lookup_records(conn, all_ids)
+
+    # 4.5 Strict tag filter (issue #8 — runs before reranker so token_budget
+    #     and top_k apply to the filtered set, fixing issue #10 ordering).
+    if tags:
+        records = _apply_tag_filter(records, tags)
+        candidates = [c for c in candidates if c.memory_id in records]
+
+    # 4.6 Project scope enforcement (issue #9) — reject project:<other> memories
+    #     unless they carry scope:cross-project.
+    if project_dir and enforce_project_scope:
+        records = _apply_project_scope_filter(records, project_dir)
+        candidates = [c for c in candidates if c.memory_id in records]
 
     # 5. Rerank — pass query so keyword-overlap signal can score candidates.
     scored: list[ScoredCandidate] = rerank(
@@ -290,6 +426,13 @@ def recall_session_memories(
     Designed to be called once at the beginning of a conversation to prime
     the assistant with user preferences, project-specific settings, and
     semantically relevant memories.
+
+    .. note::
+        Project scope enforcement (``enforce_project_scope``) is not applied
+        during session-start recall.  Always-load memories and semantic recall
+        candidates are returned regardless of ``project:<X>`` tags.  This is
+        an intentional design boundary — session-start recall is optimized for
+        breadth (loading all relevant context) rather than strict isolation.
 
     Behaviour
     ---------
