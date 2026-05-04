@@ -176,6 +176,14 @@ async def list_tools() -> list[Tool]:
                         "maximum": 100,
                         "description": "Maximum number of results to return (default from settings)",
                     },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": (
+                            "Optional cap on cumulative token cost of returned content. "
+                            "Recommended default for session-start hook injection: 1500. "
+                            "Top-1 result is always returned even if it alone exceeds the budget."
+                        ),
+                    },
                 },
                 "required": [],
             },
