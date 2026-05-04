@@ -52,6 +52,9 @@ class TestDeriveProjectId:
     def test_empty_string_returns_none(self):
         assert _derive_project_id("") is None
 
+    def test_underscore_becomes_hyphen(self):
+        assert _derive_project_id("Z:/Personal/my_project") == "my-project"
+
 
 class TestApplyProjectScopeFilter:
     def _records(self) -> dict[str, MemoryRecord]:

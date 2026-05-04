@@ -178,8 +178,8 @@ def _derive_project_id(project_dir: str | None) -> str | None:
     name = os.path.basename(project_dir.rstrip("/\\"))
     if not name:
         return None
-    # Lowercase; replace dots and spaces with hyphens; strip fringe hyphens.
-    name = re.sub(r"[\s.]+", "-", name.lower()).strip("-")
+    # Lowercase; replace dots, underscores and spaces with hyphens; strip fringe hyphens.
+    name = re.sub(r"[\s._]+", "-", name.lower()).strip("-")
     return name or None
 
 
@@ -426,6 +426,13 @@ def recall_session_memories(
     Designed to be called once at the beginning of a conversation to prime
     the assistant with user preferences, project-specific settings, and
     semantically relevant memories.
+
+    .. note::
+        Project scope enforcement (``enforce_project_scope``) is not applied
+        during session-start recall.  Always-load memories and semantic recall
+        candidates are returned regardless of ``project:<X>`` tags.  This is
+        an intentional design boundary — session-start recall is optimized for
+        breadth (loading all relevant context) rather than strict isolation.
 
     Behaviour
     ---------
