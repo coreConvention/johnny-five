@@ -183,6 +183,7 @@ async def tool_memory_search(
     token_budget: int | None = None,
     summary_only: bool = False,
     tags: list[str] | None = None,
+    enforce_project_scope: bool = True,
 ) -> dict:
     """Search memories using hybrid multi-signal retrieval.
 
@@ -212,6 +213,10 @@ async def tool_memory_search(
     tags:
         Optional list of tags that ALL returned memories must possess. Strict
         AND filter applied before ranking (so token_budget respects it).
+    enforce_project_scope:
+        When ``True`` (default) and ``project_dir`` is provided, memories with a
+        ``project:<other>`` tag are excluded unless they carry
+        ``scope:cross-project``.
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -227,6 +232,7 @@ async def tool_memory_search(
             top_k=effective_top_k,
             token_budget=token_budget,
             tags=tags,
+            enforce_project_scope=enforce_project_scope,
         )
         conn.commit()
         serializer = _search_result_to_summary_dict if summary_only else _search_result_to_dict

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import functools
 import json
+import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -154,6 +156,70 @@ def _apply_tag_filter(
 
 
 # ---------------------------------------------------------------------------
+# Project scope enforcement (issue #9)
+#
+# Memories with an explicit project:<X> tag that doesn't match the caller's
+# project are filtered out, UNLESS the memory also has scope:cross-project.
+# Memories with no project:<X> tag are always kept.
+# ---------------------------------------------------------------------------
+
+
+def _derive_project_id(project_dir: str | None) -> str | None:
+    """Normalize a project directory path to a tag-compatible project identifier.
+
+    Examples
+    --------
+    ``Z:/Personal/w31rd.com`` → ``w31rd-com``
+    ``Z:/Personal/Hac``       → ``hac``
+    ``Z:/Personal/johnnyFive`` → ``johnnyfive``
+    """
+    if not project_dir:
+        return None
+    name = os.path.basename(project_dir.rstrip("/\\"))
+    if not name:
+        return None
+    # Lowercase; replace dots and spaces with hyphens; strip fringe hyphens.
+    name = re.sub(r"[\s.]+", "-", name.lower()).strip("-")
+    return name or None
+
+
+def _apply_project_scope_filter(
+    records: dict[str, MemoryRecord],
+    project_dir: str | None,
+) -> dict[str, MemoryRecord]:
+    """Filter out memories that explicitly belong to a different project.
+
+    A memory is removed when ALL of the following hold:
+    - It carries at least one ``project:<X>`` tag.
+    - None of those tags matches ``project:<caller_project_id>``.
+    - It does NOT carry ``scope:cross-project``.
+
+    Memories with no ``project:<X>`` tag are always kept.
+    When *project_dir* is ``None``, no filtering is applied.
+    """
+    project_id = _derive_project_id(project_dir)
+    if not project_id:
+        return records
+
+    caller_tag = f"project:{project_id}"
+    filtered: dict[str, MemoryRecord] = {}
+    for mid, record in records.items():
+        tags = set(_parse_tags(record.tags))
+        project_tags = {t for t in tags if t.startswith("project:")}
+        if not project_tags:
+            filtered[mid] = record  # no explicit project claim → keep
+            continue
+        if caller_tag in project_tags:
+            filtered[mid] = record  # matches caller → keep
+            continue
+        if "scope:cross-project" in tags:
+            filtered[mid] = record  # explicitly cross-project → keep
+            continue
+        # Has project:<other> tag and no cross-project scope → exclude
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Token-budget truncation
 #
 # Callers (notably session-start-recall hooks) often have a tight context
@@ -235,6 +301,7 @@ def search_memories(
     update_access_on_retrieve: bool = True,
     token_budget: int | None = None,
     tags: list[str] | None = None,
+    enforce_project_scope: bool = True,
 ) -> list[SearchResult]:
     """Full multi-signal retrieval pipeline.
 
@@ -280,6 +347,11 @@ def search_memories(
         AND filter).  Applied after record lookup but before reranker, so
         token_budget and top_k limits apply to the already-filtered candidate
         set (resolves issue #10 ordering).
+    enforce_project_scope:
+        When ``True`` (default) and *project_dir* is provided, memories bearing
+        a ``project:<other>`` tag that doesn't match the caller's project are
+        excluded unless they carry ``scope:cross-project``.  Set to ``False``
+        for cross-project diagnostic queries.
 
     Returns
     -------
@@ -312,6 +384,12 @@ def search_memories(
     #     and top_k apply to the filtered set, fixing issue #10 ordering).
     if tags:
         records = _apply_tag_filter(records, tags)
+        candidates = [c for c in candidates if c.memory_id in records]
+
+    # 4.6 Project scope enforcement (issue #9) — reject project:<other> memories
+    #     unless they carry scope:cross-project.
+    if project_dir and enforce_project_scope:
+        records = _apply_project_scope_filter(records, project_dir)
         candidates = [c for c in candidates if c.memory_id in records]
 
     # 5. Rerank — pass query so keyword-overlap signal can score candidates.
