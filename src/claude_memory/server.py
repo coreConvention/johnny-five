@@ -113,6 +113,40 @@ async def list_tools() -> list[Tool]:
                         "maximum": 100,
                         "description": "Maximum number of results to return (default from settings)",
                     },
+                    "summary_only": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When True, returns compact results (id, type, tags, importance, "
+                            "tier, score, 200-char preview, project_dir, timestamps, access_count) "
+                            "without the full content field. Use for two-pass retrieval."
+                        ),
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of tags that ALL returned memories must possess "
+                            "(strict AND filter). Applied before ranking so token_budget "
+                            "respects it (issue #10 ordering fix)."
+                        ),
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": (
+                            "Optional cap on cumulative token cost of returned content. "
+                            "Top-1 result is always returned even if it alone exceeds the budget."
+                        ),
+                    },
+                    "enforce_project_scope": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When True (default) and project_dir is provided, memories with a "
+                            "project:<other> tag are excluded unless they carry scope:cross-project. "
+                            "Set False for cross-project diagnostic queries."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -141,6 +175,14 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 100,
                         "description": "Maximum number of results to return (default from settings)",
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": (
+                            "Optional cap on cumulative token cost of returned content. "
+                            "Recommended default for session-start hook injection: 1500. "
+                            "Top-1 result is always returned even if it alone exceeds the budget."
+                        ),
                     },
                 },
                 "required": [],

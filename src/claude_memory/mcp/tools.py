@@ -90,6 +90,34 @@ def _search_result_to_dict(result: SearchResult) -> dict:
     }
 
 
+def _search_result_to_summary_dict(result: SearchResult) -> dict:
+    """Compact serialization for two-pass retrieval workflows (issue #7).
+
+    Omits full content — returns a ~200-char preview instead.
+    Callers use memory_get(id) for full content of selected results.
+    """
+    tags = (
+        result.memory.tags
+        if isinstance(result.memory.tags, list)
+        else json.loads(result.memory.tags or "[]")
+    )
+    content = result.memory.content or ""
+    preview = content[:200] + "..." if len(content) > 200 else content
+    return {
+        "id": result.memory.id,
+        "type": result.memory.type,
+        "tags": tags,
+        "importance": result.memory.importance,
+        "tier": result.memory.tier,
+        "score": round(result.score, 4),
+        "preview": preview,
+        "project_dir": result.memory.project_dir,
+        "created_at": result.memory.created_at,
+        "updated_at": result.memory.updated_at,
+        "access_count": result.memory.access_count,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool functions
 # ---------------------------------------------------------------------------
@@ -153,6 +181,9 @@ async def tool_memory_search(
     project_dir: str | None = None,
     top_k: int | None = None,
     token_budget: int | None = None,
+    summary_only: bool = False,
+    tags: list[str] | None = None,
+    enforce_project_scope: bool = True,
 ) -> dict:
     """Search memories using hybrid multi-signal retrieval.
 
@@ -173,6 +204,19 @@ async def tool_memory_search(
         Optional cap on cumulative token cost of returned ``content``. Useful
         for fitting recall output into a hook-injected context block.
         Top-1 result is always returned even if it alone exceeds the budget.
+    summary_only:
+        When True, returns compact results (id, type, tags, importance, tier,
+        score, 200-char preview, project_dir, timestamps, access_count) without
+        the full ``content`` field.  Use for two-pass retrieval: first call with
+        summary_only=True to find relevant IDs cheaply, then fetch full content
+        with memory_get for selected results.
+    tags:
+        Optional list of tags that ALL returned memories must possess. Strict
+        AND filter applied before ranking (so token_budget respects it).
+    enforce_project_scope:
+        When ``True`` (default) and ``project_dir`` is provided, memories with a
+        ``project:<other>`` tag are excluded unless they carry
+        ``scope:cross-project``.
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -187,10 +231,13 @@ async def tool_memory_search(
             weights=weights,
             top_k=effective_top_k,
             token_budget=token_budget,
+            tags=tags,
+            enforce_project_scope=enforce_project_scope,
         )
         conn.commit()
+        serializer = _search_result_to_summary_dict if summary_only else _search_result_to_dict
         return {
-            "results": [_search_result_to_dict(r) for r in results],
+            "results": [serializer(r) for r in results],
         }
     finally:
         conn.close()
