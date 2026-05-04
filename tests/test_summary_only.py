@@ -81,6 +81,12 @@ class TestSearchResultToSummaryDict:
                       "importance_score", "lexical_score"):
             assert field not in d
 
+    def test_exactly_200_chars_no_ellipsis(self):
+        result = _make_result(content="x" * 200)
+        d = _search_result_to_summary_dict(result)
+        assert not d["preview"].endswith("...")
+        assert len(d["preview"]) == 200
+
     def test_full_dict_still_has_content(self):
         result = _make_result(content="full content")
         d = _search_result_to_dict(result)

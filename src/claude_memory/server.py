@@ -113,6 +113,15 @@ async def list_tools() -> list[Tool]:
                         "maximum": 100,
                         "description": "Maximum number of results to return (default from settings)",
                     },
+                    "summary_only": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When True, returns compact results (id, type, tags, importance, "
+                            "tier, score, 200-char preview, project_dir, timestamps, access_count) "
+                            "without the full content field. Use for two-pass retrieval."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
