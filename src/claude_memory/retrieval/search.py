@@ -12,6 +12,7 @@ Provides two entry points:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -125,11 +126,10 @@ def _parse_tags(raw: list[str] | str | None) -> list[str]:
         return []
     if isinstance(raw, list):
         return raw
-    import json as _json
     try:
-        parsed = _json.loads(raw)
+        parsed = json.loads(raw)
         return parsed if isinstance(parsed, list) else []
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return []
 
 
@@ -145,7 +145,7 @@ def _apply_tag_filter(
     """
     if not required_tags:
         return records
-    required = set(required_tags)
+    required = set(required_tags)  # set() deduplicates — ["a", "a"] behaves as ["a"]
     return {
         mid: record
         for mid, record in records.items()
