@@ -182,6 +182,7 @@ async def tool_memory_search(
     top_k: int | None = None,
     token_budget: int | None = None,
     summary_only: bool = False,
+    tags: list[str] | None = None,
 ) -> dict:
     """Search memories using hybrid multi-signal retrieval.
 
@@ -208,6 +209,9 @@ async def tool_memory_search(
         the full ``content`` field.  Use for two-pass retrieval: first call with
         summary_only=True to find relevant IDs cheaply, then fetch full content
         with memory_get for selected results.
+    tags:
+        Optional list of tags that ALL returned memories must possess. Strict
+        AND filter applied before ranking (so token_budget respects it).
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -222,6 +226,7 @@ async def tool_memory_search(
             weights=weights,
             top_k=effective_top_k,
             token_budget=token_budget,
+            tags=tags,
         )
         conn.commit()
         serializer = _search_result_to_summary_dict if summary_only else _search_result_to_dict

@@ -122,6 +122,15 @@ async def list_tools() -> list[Tool]:
                             "without the full content field. Use for two-pass retrieval."
                         ),
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of tags that ALL returned memories must possess "
+                            "(strict AND filter). Applied before ranking so token_budget "
+                            "respects it (issue #10 ordering fix)."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },

@@ -108,6 +108,52 @@ def _update_access_stats(
 
 
 # ---------------------------------------------------------------------------
+# Tag filter (issue #8)
+#
+# Strict AND filter — only memories possessing ALL required_tags survive.
+# Runs after record lookup but before reranker so that token_budget (issue #10)
+# and top_k limits apply to the already-filtered set, not the full candidate pool.
+# ---------------------------------------------------------------------------
+
+def _parse_tags(raw: list[str] | str | None) -> list[str]:
+    """Return a normalised tag list regardless of how tags are stored.
+
+    MemoryRecord.tags may be a Python list (when constructed in tests or after
+    a fresh query) or a JSON-encoded string (as SQLite stores it).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    import json as _json
+    try:
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _apply_tag_filter(
+    records: dict[str, MemoryRecord],
+    required_tags: list[str] | None,
+) -> dict[str, MemoryRecord]:
+    """Return the subset of *records* where every required tag is present.
+
+    When *required_tags* is ``None`` or empty, returns *records* unchanged.
+    Tags on the record may be a Python list or a JSON-encoded string — both
+    are handled via :func:`_parse_tags`.
+    """
+    if not required_tags:
+        return records
+    required = set(required_tags)
+    return {
+        mid: record
+        for mid, record in records.items()
+        if required.issubset(set(_parse_tags(record.tags)))
+    }
+
+
+# ---------------------------------------------------------------------------
 # Token-budget truncation
 #
 # Callers (notably session-start-recall hooks) often have a tight context
@@ -188,6 +234,7 @@ def search_memories(
     top_k: int = 15,
     update_access_on_retrieve: bool = True,
     token_budget: int | None = None,
+    tags: list[str] | None = None,
 ) -> list[SearchResult]:
     """Full multi-signal retrieval pipeline.
 
@@ -228,6 +275,11 @@ def search_memories(
         ``content``.  Results are iterated in ranking order and the list
         is truncated at the first candidate that would exceed the budget
         (top-1 is always included regardless).
+    tags:
+        Optional list of tags that ALL returned memories must possess (strict
+        AND filter).  Applied after record lookup but before reranker, so
+        token_budget and top_k limits apply to the already-filtered candidate
+        set (resolves issue #10 ordering).
 
     Returns
     -------
@@ -255,6 +307,12 @@ def search_memories(
     # 4. Lookup
     all_ids: list[str] = [c.memory_id for c in candidates]
     records: dict[str, MemoryRecord] = _lookup_records(conn, all_ids)
+
+    # 4.5 Strict tag filter (issue #8 — runs before reranker so token_budget
+    #     and top_k apply to the filtered set, fixing issue #10 ordering).
+    if tags:
+        records = _apply_tag_filter(records, tags)
+        candidates = [c for c in candidates if c.memory_id in records]
 
     # 5. Rerank — pass query so keyword-overlap signal can score candidates.
     scored: list[ScoredCandidate] = rerank(
