@@ -9,9 +9,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import pathlib
 import sqlite3
 import sys
 import types
+
+# Ensure this worktree's src/ takes precedence over the global install so
+# that edits in the worktree are tested rather than the installed package.
+_WORKTREE_SRC = str(pathlib.Path(__file__).parent.parent / "src")
+if _WORKTREE_SRC not in sys.path:
+    sys.path.insert(0, _WORKTREE_SRC)
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from unittest.mock import patch
