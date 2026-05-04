@@ -131,6 +131,22 @@ async def list_tools() -> list[Tool]:
                             "respects it (issue #10 ordering fix)."
                         ),
                     },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": (
+                            "Optional cap on cumulative token cost of returned content. "
+                            "Top-1 result is always returned even if it alone exceeds the budget."
+                        ),
+                    },
+                    "enforce_project_scope": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When True (default) and project_dir is provided, memories with a "
+                            "project:<other> tag are excluded unless they carry scope:cross-project. "
+                            "Set False for cross-project diagnostic queries."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
