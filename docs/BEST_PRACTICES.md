@@ -41,7 +41,7 @@ The same principle applies to memories: targeted retrieval > full-context loadin
 | Architecture decision | `project` | Decisions persist past their original conversation. The "why" is hard to recover from code; store it. |
 | Debugging gotcha | `lesson` | The hardest-won knowledge. A 4-hour debugging session compressed into a paragraph is the highest ROI memory in the entire system. |
 | External reference | `reference` | URLs, dashboards, ticket IDs that aren't in the codebase. |
-| Cross-cutting insight | `lesson` or `project` | Non-obvious connections between systems. The "★ box" pattern from coreConvention's CLAUDE.md — these are J5's sweet spot. |
+| Cross-cutting insight | `lesson` or `project` | Non-obvious connections between systems. The "★ box" pattern from the global CLAUDE.md — these are J5's sweet spot. |
 
 ### Don't store
 
