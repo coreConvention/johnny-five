@@ -2,7 +2,7 @@
 
 > **Status**: Draft
 > **Created**: 2026-03-11
-> **Author**: coreConvention + Claude
+> **Author**: Claude
 
 ## Problem Statement
 
@@ -287,7 +287,7 @@ Claude Code connects to this as an MCP server. Configured in `.mcp.json`:
       "command": "python",
       "args": ["-m", "claude_memory.server"],
       "env": {
-        "MEMORY_DB_PATH": "C:/Users/coreConvention/.claude/memory.db",
+        "MEMORY_DB_PATH": "C:/Users/<username>/.claude/memory.db",
         "MEMORY_MODEL": "all-MiniLM-L6-v2"
       }
     }
@@ -304,7 +304,7 @@ Or via Docker:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "C:/Users/coreConvention/.claude:/data",
+        "-v", "C:/Users/<username>/.claude:/data",
         "claude-memory:latest"
       ]
     }
@@ -553,7 +553,7 @@ All retrieval operations are sub-50ms — invisible relative to LLM inference.
 
 ## Migration Path from Current Memory System
 
-The existing flat-file memory system (`C:\Users\coreConvention\.claude\projects\*\memory\`)
+The existing flat-file memory system (`C:\Users\<username>\.claude\projects\*\memory\`)
 can be imported:
 
 1. Read each `.md` file from the memory directory

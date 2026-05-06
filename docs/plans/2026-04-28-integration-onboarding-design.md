@@ -6,14 +6,14 @@
 
 ## Goal
 
-Make it possible for a user to point Claude at this repo and get the same johnny-five integration coreConvention uses, without conversation-context babysitting. Documentation is **agent-first**: the primary readers are future Claude sessions executing `/integrate`, not humans skimming for marketing.
+Make it possible for a user to point Claude at this repo and get the same johnny-five integration, without conversation-context babysitting. Documentation is **agent-first**: the primary readers are future Claude sessions executing `/integrate`, not humans skimming for marketing.
 
 ## Why this is needed
 
 The repo today has the engine (8 MCP tools, retrieval, lifecycle), `setup/hooks/`, `docs/INTEGRATION.md` (deep architectural reference), and a tier-1 CLAUDE.md snippet. What's missing for cold integration:
 
 1. A self-contained agent runbook that handles state detection, idempotent installs, and verification end-to-end.
-2. The full discipline ruleset (search-first, store-on-correction, scoping invariants) — currently lives only in coreConvention's private `~/.claude/CLAUDE.md` and is what makes J5 *useful* rather than just installed.
+2. The full discipline ruleset (search-first, store-on-correction, scoping invariants) — currently lives only in the user's private `~/.claude/CLAUDE.md` and is what makes J5 *useful* rather than just installed.
 3. Backup/restore as first-class operations docs (the README has a paragraph; ops needs a runbook).
 4. A Claude-facing gotcha file Claude will grep when J5 misbehaves.
 
