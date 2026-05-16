@@ -413,40 +413,52 @@ def run_sse(port: int) -> None:
     """
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
-    from starlette.requests import Request
-    from starlette.routing import Mount, Route
+    from starlette.routing import Mount
+    from starlette.types import Receive, Scope, Send
 
     import uvicorn
 
     sse = SseServerTransport("/messages/")
 
-    async def handle_sse(request: Request) -> None:
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send,
-        ) as streams:
+    # Raw ASGI handler registered via Mount so Starlette's request_response
+    # wrapper is bypassed. connect_sse drives the HTTP response lifecycle
+    # internally via EventSourceResponse — if we used Route(endpoint=...),
+    # Starlette 1.0+ would execute `await response(scope, receive, send)`
+    # against the None return of this function after the SSE stream closes,
+    # raising `TypeError: 'NoneType' object is not callable`. Mounting matches
+    # the pattern already used for "/messages/" below.
+    #
+    # We must zero `root_path` in the scope before calling connect_sse:
+    # Starlette's Mount stamps `scope["root_path"] = "/sse"`, and connect_sse
+    # advertises the message endpoint to clients as `root_path + "/messages/"`.
+    # The sibling Mount registers POST handling at "/messages/" (no prefix),
+    # so without this rewrite clients would post to "/sse/messages/" and 404.
+    async def handle_sse(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        rewritten_scope = dict(scope)
+        rewritten_scope["root_path"] = ""
+        async with sse.connect_sse(rewritten_scope, receive, send) as streams:
             await app.run(
                 streams[0],
                 streams[1],
                 app.create_initialization_options(),
             )
 
-    # Hold the background task handle on a mutable container so the shutdown
-    # callback can reference the same object created at startup.
-    bg_task_ref: dict[str, asyncio.Task | None] = {"task": None}
+    from contextlib import asynccontextmanager
 
-    async def _on_startup() -> None:
-        bg_task_ref["task"] = await _start_auto_consolidation_if_enabled()
-
-    async def _on_shutdown() -> None:
-        await _stop_auto_consolidation(bg_task_ref["task"])
+    @asynccontextmanager
+    async def lifespan(_app: Starlette):
+        bg_task = await _start_auto_consolidation_if_enabled()
+        yield
+        await _stop_auto_consolidation(bg_task)
 
     starlette_app = Starlette(
         routes=[
-            Route("/sse", endpoint=handle_sse),
+            Mount("/sse", app=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
-        on_startup=[_on_startup],
-        on_shutdown=[_on_shutdown],
+        lifespan=lifespan,
     )
 
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)

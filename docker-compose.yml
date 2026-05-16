@@ -13,4 +13,4 @@ services:
 
 volumes:
   johnny-five-data:
-    driver: local
+    external: true
