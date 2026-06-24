@@ -1,0 +1,79 @@
+{
+  "_comment": "Enforced-tier (Tiers 2–4) hook config. See docs/INTEGRATION.md for context. The seven scripts referenced here (session-start-recall.sh, memory-context-inject.sh, precompact-enforce.sh, user-prompt-correction.sh, tool-failure-tracker.js, memory-discipline-track.js, memory-discipline-enforce.js) live in setup/hooks/ — copy them to ~/.claude/hooks/ (and chmod +x) before enabling. The scripts auto-discover the johnny-five container (compose name 'johnny-five-johnny-five-1' first, then bare 'johnny-five'). When merging into an existing settings.json, ADD to each event's hooks array — do not replace arrays that already contain other hooks.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/session-start-recall.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/memory-context-inject.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/tool-failure-tracker.js"
+          },
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/memory-discipline-track.js"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ~/.claude/hooks/memory-discipline-enforce.js"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/user-prompt-correction.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "BEFORE context compaction occurs, preserve session state by calling `memory_store` on johnny-five with type 'project', importance 10, tags ['session-state', 'precompact'], and content that includes: (1) the prompt/plan file path driving this session, (2) current step, (3) completed steps, (4) active blockers/decisions, (5) runtime context (ports, services, env). A command-type hook will verify this ran; if you skipped it, that hook writes a mechanical-floor summary automatically, but your model-authored version is always richer."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/precompact-enforce.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

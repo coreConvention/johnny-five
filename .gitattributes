@@ -1,0 +1,5 @@
+# Hook scripts run in bash/node on Linux/macOS; keep LF so a CRLF shebang
+# line never breaks execution on a non-Windows target.
+*.sh text eol=lf
+*.js text eol=lf
+*.py text eol=lf

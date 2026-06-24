@@ -1,0 +1,60 @@
+{
+  "kappa": 0.3,
+  "top_k": 5,
+  "topic": "movie",
+  "total_items": 8500,
+  "overall_pct": 81.82352941176471,
+  "by_category": {
+    "simple": {
+      "hit": 965,
+      "total": 1000,
+      "pct": 96.5
+    },
+    "highlevel": {
+      "hit": 486,
+      "total": 500,
+      "pct": 97.2
+    },
+    "knowledge_update": {
+      "hit": 976,
+      "total": 1000,
+      "pct": 97.6
+    },
+    "comparative": {
+      "hit": 990,
+      "total": 1000,
+      "pct": 99.0
+    },
+    "conditional": {
+      "hit": 601,
+      "total": 1000,
+      "pct": 60.099999999999994
+    },
+    "noisy": {
+      "hit": 452,
+      "total": 1000,
+      "pct": 45.2
+    },
+    "aggregative": {
+      "hit": 987,
+      "total": 1000,
+      "pct": 98.7
+    },
+    "highlevel_rec": {
+      "hit": 401,
+      "total": 500,
+      "pct": 80.2
+    },
+    "lowlevel_rec": {
+      "hit": 499,
+      "total": 500,
+      "pct": 99.8
+    },
+    "post_processing": {
+      "hit": 598,
+      "total": 1000,
+      "pct": 59.8
+    }
+  },
+  "elapsed_sec": 9480.90135025978
+}
