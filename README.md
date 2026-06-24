@@ -388,9 +388,9 @@ johnny-five --transport sse --port 8787   # SSE/HTTP (recommended)
 johnny-five                               # stdio (single process)
 ```
 
-> SSE requires Starlette ≥ 1.0 (pulled in transitively via FastAPI/uvicorn). The
-> Docker image bundles a compatible version; on a bare `pip install`, don't pin
-> Starlette below 1.0 or the SSE transport will break.
+> SSE requires Starlette ≥ 0.46 (declared as a direct dependency; also pulled in by
+> FastAPI). The Docker image bundles a compatible version; on a bare `pip install`,
+> don't pin Starlette below 0.46 or the SSE transport will break.
 
 ## Development
 
@@ -559,8 +559,8 @@ MCP connections are established at session init. If Docker isn't running at that
   `docker volume create johnny-five-data` first. The compose file declares the volume
   `external` so it is never auto-created or accidentally clobbered.
 - **`TypeError: 'NoneType' object is not callable`, or a 404 on `/messages/`** — you're
-  on a build that predates the Starlette 1.0+ SSE fix. Rebuild from latest. SSE requires
-  Starlette ≥ 1.0 (transitive via FastAPI/uvicorn). A `POST /messages/?session_id=...`
+  on a build that predates the Mount-based SSE fix. Rebuild from latest. SSE requires
+  Starlette ≥ 0.46. A `POST /messages/?session_id=...`
   returning **400** (not 404) is expected — the route is present.
 
 ### Container exits immediately (stdio)
