@@ -18,6 +18,7 @@ from claude_memory.mcp.tools import (
     tool_memory_stats,
     tool_memory_store,
     tool_memory_update,
+    tool_memory_why,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["memory"])
@@ -57,7 +58,14 @@ class SearchRequest(BaseModel):
 
 
 class SearchResultItem(BaseModel):
-    """A single search hit with scores."""
+    """A single search hit with scores and provenance signals.
+
+    The provenance fields (``access_count``, ``last_accessed``,
+    ``source_session``, ``project_dir``) bring the full REST result to parity
+    with the MCP serializer so the dashboard (A1) can prune on them. Without
+    them declared here, FastAPI silently drops the serializer's provenance keys
+    and the surfacing is a no-op.
+    """
 
     id: str
     content: str
@@ -66,6 +74,10 @@ class SearchResultItem(BaseModel):
     tier: str
     importance: float
     tags: list[str]
+    access_count: int
+    last_accessed: str
+    source_session: str | None = None
+    project_dir: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -101,11 +113,17 @@ class ForgetRequest(BaseModel):
 
 
 class StatsResponse(BaseModel):
-    """Aggregate memory statistics."""
+    """Aggregate memory statistics, including the audit's headline signals."""
 
     by_type: dict[str, int]
     by_tier: dict[str, int]
     total: int
+    # Tier A / A2 headline aggregates — the dashboard header and regression
+    # tripwires: never_retrieved (access_count == 0), unscoped (project_dir IS
+    # NULL), top_n_share (fraction of all retrievals in the top-N memories).
+    never_retrieved: int
+    unscoped: int
+    top_n_share: float
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +167,18 @@ async def forget(memory_id: str, request: ForgetRequest | None = None) -> dict:
     """Delete (or archive) a memory by ID."""
     archive: bool = request.archive if request else True
     result: dict = await tool_memory_forget(memory_id=memory_id, archive=archive)
+    return result
+
+
+@router.get("/memories/{memory_id}/why")
+async def why(memory_id: str) -> dict:
+    """Explain why a memory is known — its provenance and lineage (no content).
+
+    Read-only; does not count as a retrieval. Returns 404 if the id is unknown.
+    """
+    result: dict = await tool_memory_why(memory_id=memory_id)
+    if not result.get("found", False):
+        raise HTTPException(status_code=404, detail="Memory not found")
     return result
 
 
