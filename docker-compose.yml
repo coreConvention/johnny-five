@@ -11,6 +11,23 @@ services:
       - MEMORY_MODEL=all-MiniLM-L6-v2
     command: ["--transport", "sse", "--port", "8787"]
 
+  # Read-only memory dashboard + REST API (Tier A / A1). A SEPARATE service
+  # from the MCP server above (never mounted into it) that reads the SAME DB
+  # volume. It exposes mutating endpoints (archive / importance edit), so the
+  # host port is published only on 127.0.0.1 — the container binds 0.0.0.0 for
+  # the port map, but the surface never reaches the LAN.
+  johnny-five-dashboard:
+    build: .
+    image: johnny-five:latest
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - johnny-five-data:/data
+    environment:
+      - MEMORY_DB_PATH=/data/memory.db
+      - MEMORY_MODEL=all-MiniLM-L6-v2
+    command: ["--transport", "api", "--host", "0.0.0.0", "--port", "8788"]
+
 volumes:
   johnny-five-data:
     external: true

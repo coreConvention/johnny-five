@@ -6,13 +6,15 @@ underlying functions so behaviour is identical regardless of transport.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from claude_memory.db.queries import ListQueryError
 from claude_memory.mcp.tools import (
     tool_memory_aging,
     tool_memory_consolidate,
     tool_memory_forget,
+    tool_memory_list,
     tool_memory_recall,
     tool_memory_search,
     tool_memory_stats,
@@ -126,6 +128,29 @@ class StatsResponse(BaseModel):
     top_n_share: float
 
 
+class MemoryListItem(BaseModel):
+    """A single row in the dashboard browse view (A1)."""
+
+    id: str
+    content: str
+    type: str
+    tags: list[str]
+    importance: float
+    tier: str
+    access_count: int
+    last_accessed: str
+    created_at: str
+    source_session: str | None = None
+    project_dir: str | None = None
+
+
+class MemoryListResponse(BaseModel):
+    """Wrapper for the paginated browse list."""
+
+    results: list[MemoryListItem]
+    count: int
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -152,6 +177,41 @@ async def recall(request: RecallRequest) -> SearchResponse:
     return SearchResponse(results=result["results"], count=len(result["results"]))
 
 
+@router.get("/memories", response_model=MemoryListResponse)
+async def list_memories_endpoint(
+    sort: str = Query("created_at", description="access_count | importance | created_at | last_accessed"),
+    order: str = Query("desc", description="asc | desc"),
+    filter: str | None = Query(None, description="never_retrieved | unscoped"),
+    tier: str | None = Query(None, description="hot | warm | cold | archived"),
+    type: str | None = Query(None, description="user | feedback | project | reference | lesson"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
+) -> MemoryListResponse:
+    """Browse the corpus (dashboard, A1).
+
+    ``sort`` / ``order`` / ``filter`` are whitelist-validated — an unknown value
+    is a 400, never interpolated into SQL.
+    """
+    try:
+        result: dict = await tool_memory_list(
+            sort=sort,
+            order=order,
+            filter=filter,
+            tier=tier,
+            type=type,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+        )
+    except ListQueryError as exc:
+        # Only whitelist-validation failures are 400s. A json decode error from a
+        # corrupt row is also a ValueError but must surface as a 500, not be
+        # mislabelled a bad request — so we catch ListQueryError specifically.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return MemoryListResponse(**result)
+
+
 @router.patch("/memories/{memory_id}")
 async def update(memory_id: str, request: UpdateRequest) -> dict:
     """Partially update an existing memory's fields."""
@@ -164,9 +224,20 @@ async def update(memory_id: str, request: UpdateRequest) -> dict:
 
 @router.delete("/memories/{memory_id}")
 async def forget(memory_id: str, request: ForgetRequest | None = None) -> dict:
-    """Delete (or archive) a memory by ID."""
-    archive: bool = request.archive if request else True
-    result: dict = await tool_memory_forget(memory_id=memory_id, archive=archive)
+    """Archive a memory by ID (soft delete → ``archived`` tier).
+
+    Hard delete is **not permitted** over this HTTP surface: the dashboard's
+    "forget" only ever archives, and Tier A design §2 forbids hard-deleting a
+    memory. An explicit ``archive=false`` is rejected rather than silently
+    honoured, so a served, unauthenticated port can never destroy a memory.
+    (The archival/``supersedes`` graph remains the only removal mechanism.)
+    """
+    if request is not None and request.archive is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Hard delete is not permitted; memories can only be archived.",
+        )
+    result: dict = await tool_memory_forget(memory_id=memory_id, archive=True)
     return result
 
 

@@ -21,6 +21,9 @@ def get_connection(
     The returned connection has:
     - WAL journal mode for concurrent readers
     - ``synchronous=NORMAL`` for a good durability/speed trade-off
+    - a 5 s ``busy_timeout`` so a briefly-locked write (e.g. the read-only
+      dashboard process and the MCP process both touching the DB) waits and
+      retries rather than immediately raising ``SQLITE_BUSY``
     - 64 MB page cache
     - Foreign-key enforcement enabled
     - The sqlite-vec extension loaded
@@ -60,7 +63,10 @@ def get_connection(
     except (AttributeError, sqlite3.NotSupportedError):
         pass
 
-    # Performance / safety pragmas.
+    # Performance / safety pragmas. busy_timeout is set FIRST so even the
+    # journal_mode=WAL switch (which briefly needs an exclusive lock) waits out
+    # a concurrent writer instead of failing immediately.
+    conn.execute("PRAGMA busy_timeout=5000")  # 5 s — wait out concurrent writers
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-64000")  # 64 MB (negative = KiB)

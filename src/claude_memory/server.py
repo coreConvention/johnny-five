@@ -4,9 +4,13 @@ Run via::
 
     python -m claude_memory.server          # stdio transport (default)
     python -m claude_memory.server --transport sse --port 8787
+    python -m claude_memory.server --transport api --port 8788   # dashboard + REST
 
 The server exposes nine tools for storing, searching, updating, inspecting,
 and managing memories, plus resource endpoints for browsing the database.
+
+The ``api`` transport serves the read-only dashboard + REST API as a **separate**
+process (``claude_memory.api.app``); it does not touch the MCP stdio/sse path.
 """
 
 from __future__ import annotations
@@ -429,10 +433,12 @@ async def run_stdio() -> None:
         await _stop_auto_consolidation(bg_task)
 
 
-def run_sse(port: int) -> None:
+def run_sse(port: int, host: str = "0.0.0.0") -> None:
     """Run the MCP server over SSE/HTTP transport.
 
-    Requires ``uvicorn`` and ``starlette`` to be installed.
+    Requires ``uvicorn`` and ``starlette`` to be installed. ``host`` defaults to
+    ``0.0.0.0`` (the container needs this for its published port map); pass
+    ``--host 127.0.0.1`` to keep it host-local.
     """
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
@@ -484,7 +490,7 @@ def run_sse(port: int) -> None:
         lifespan=lifespan,
     )
 
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(starlette_app, host=host, port=port)
 
 
 # ---------------------------------------------------------------------------
@@ -497,22 +503,46 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Claude Memory MCP Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "api"],
         default="stdio",
-        help="Transport protocol (default: stdio)",
+        help=(
+            "Transport protocol (default: stdio). 'api' serves the read-only "
+            "dashboard + REST API as a SEPARATE service from the MCP server."
+        ),
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=8787,
-        help="Port for SSE transport (default: 8787)",
+        default=None,
+        help="Port for sse/api transport (default: 8787 for sse, 8788 for api)",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help=(
+            "Bind host. Applies to both 'sse' and 'api'. Defaults: 0.0.0.0 for "
+            "sse (its container needs this for the port map), 127.0.0.1 for api "
+            "(the dashboard exposes mutating endpoints, so it stays host-local). "
+            "Pass --host explicitly to override either."
+        ),
     )
     args = parser.parse_args()
 
     if args.transport == "stdio":
         asyncio.run(run_stdio())
     elif args.transport == "sse":
-        run_sse(args.port)
+        run_sse(
+            args.port if args.port is not None else 8787,
+            host=args.host if args.host is not None else "0.0.0.0",
+        )
+    elif args.transport == "api":
+        # Lazy import: keeps the dashboard/FastAPI stack out of the stdio/sse path.
+        from claude_memory.api.app import run_api
+
+        run_api(
+            host=args.host if args.host is not None else "127.0.0.1",
+            port=args.port if args.port is not None else 8788,
+        )
 
 
 if __name__ == "__main__":

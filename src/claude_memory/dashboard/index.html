@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>johnny-five · memory dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5b6570;
+    --line: #e2e6ea; --accent: #0e7c66; --accent-ink: #ffffff;
+    --chip: #eef1f4; --warn: #b23b3b; --shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --panel: #1c2024; --ink: #e6e9ec; --muted: #9aa4ae;
+      --line: #2a2f35; --accent: #35b79a; --accent-ink: #08110e;
+      --chip: #262b31; --warn: #e07070; --shadow: 0 1px 2px rgba(0,0,0,.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+  }
+  header { padding: 18px 22px 8px; }
+  h1 { margin: 0 0 2px; font-size: 18px; }
+  .sub { color: var(--muted); font-size: 12.5px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 6px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 14px; min-width: 128px; box-shadow: var(--shadow);
+  }
+  .stat .n { font-size: 20px; font-weight: 650; }
+  .stat .l { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
+  .stat.flag .n { color: var(--warn); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 22px 14px; }
+  .chip {
+    border: 1px solid var(--line); background: var(--chip); color: var(--ink);
+    border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 12.5px;
+  }
+  .chip.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  select { font-size: 12.5px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+  .spacer { flex: 1; }
+  .wrap { padding: 0 22px 40px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { position: sticky; top: 0; background: var(--panel); font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable.on { color: var(--accent); }
+  td.content { max-width: 460px; }
+  .preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .tags { margin-top: 3px; }
+  .tag { display: inline-block; background: var(--chip); border-radius: 5px; padding: 1px 6px; margin: 1px 3px 1px 0; font-size: 11px; color: var(--muted); }
+  .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+  .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .zero { color: var(--warn); font-weight: 600; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); word-break: break-all; }
+  button.act { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 7px; padding: 4px 9px; cursor: pointer; font-size: 12px; }
+  button.act.warn { color: var(--warn); border-color: var(--warn); }
+  button.act:hover { filter: brightness(.97); }
+  .foot { display: flex; gap: 10px; align-items: center; padding: 12px 2px; color: var(--muted); font-size: 12.5px; }
+  .status { min-height: 18px; padding: 4px 22px; color: var(--accent); font-size: 12.5px; }
+  .empty { padding: 26px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>johnny-five · memory dashboard</h1>
+  <div class="sub">Read-only corpus inspection &amp; hygiene (Tier A / A1). Mutations are host-local and confirmed.</div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<div class="controls">
+  <button class="chip" data-preset="all">All</button>
+  <button class="chip" data-preset="never">Never retrieved</button>
+  <button class="chip" data-preset="top15">Top 15 retrieved</button>
+  <button class="chip" data-preset="unscoped">Unscoped</button>
+  <span class="spacer"></span>
+  <label>tier
+    <select id="tier">
+      <option value="">any</option><option>hot</option><option>warm</option>
+      <option>cold</option><option>archived</option>
+    </select>
+  </label>
+  <label>type
+    <select id="type">
+      <option value="">any</option><option>user</option><option>feedback</option>
+      <option>project</option><option>reference</option><option>lesson</option>
+    </select>
+  </label>
+</div>
+
+<div class="status" id="status"></div>
+
+<div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Content</th>
+        <th>Type</th>
+        <th>Tier</th>
+        <th class="sortable num" data-sort="importance">Importance</th>
+        <th class="sortable num" data-sort="access_count">Access</th>
+        <th class="sortable" data-sort="last_accessed">Last accessed</th>
+        <th class="sortable" data-sort="created_at">Created</th>
+        <th>Project</th>
+        <th>Session</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="foot">
+    <button class="act" id="prev">‹ Prev</button>
+    <span id="page"></span>
+    <button class="act" id="next">Next ›</button>
+  </div>
+</div>
+
+<script>
+const API = "/api/v1";
+const state = { sort: "created_at", order: "desc", filter: null, tier: "", type: "", limit: 50, offset: 0, include_archived: false };
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+};
+function q(params) {
+  const u = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== null && v !== "" && v !== undefined) u.set(k, v);
+  return u.toString();
+}
+async function api(path, opts) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    let detail = null;
+    try { detail = (await r.json()).detail; } catch (_) { /* non-JSON body */ }
+    if (Array.isArray(detail)) detail = detail.map(d => d.msg || JSON.stringify(d)).join("; ");
+    else if (detail && typeof detail === "object") detail = JSON.stringify(detail);
+    throw new Error(detail || (r.status + " " + r.statusText));
+  }
+  return r.status === 204 ? null : r.json();
+}
+function setStatus(msg, warn) {
+  const s = document.getElementById("status");
+  s.textContent = msg || ""; s.style.color = warn ? "var(--warn)" : "var(--accent)";
+}
+function fmtDate(s) { if (!s) return "—"; const d = new Date(s); return isNaN(d) ? s : d.toISOString().slice(0, 10); }
+const cell = (text, cls) => el("td", cls, text);
+
+async function loadStats() {
+  try {
+    const s = await api("/stats");
+    const cards = [
+      ["Total", String(s.total), false],
+      ["Never retrieved", String(s.never_retrieved), s.never_retrieved > 0],
+      ["Unscoped", String(s.unscoped), s.unscoped > 0],
+      ["Top-15 share", (s.top_n_share * 100).toFixed(1) + "%", false],
+    ];
+    const box = document.getElementById("stats");
+    box.replaceChildren(...cards.map(([label, num, flag]) => {
+      const card = el("div", "stat" + (flag ? " flag" : ""));
+      card.append(el("div", "n", num), el("div", "l", label));
+      return card;
+    }));
+  } catch (e) { setStatus("Failed to load stats: " + e.message, true); }
+}
+
+function buildRow(m) {
+  const tr = document.createElement("tr");
+
+  const c = el("td", "content");
+  c.appendChild(el("div", "preview", m.content || ""));
+  if (m.tags && m.tags.length) {
+    const tg = el("div", "tags");
+    for (const t of m.tags) tg.appendChild(el("span", "tag", t));
+    c.appendChild(tg);
+  }
+  tr.appendChild(c);
+
+  tr.appendChild(cell(m.type));
+  const tierTd = el("td"); tierTd.appendChild(el("span", "pill", m.tier)); tr.appendChild(tierTd);
+  tr.appendChild(cell(Number(m.importance).toFixed(1), "num"));
+  tr.appendChild(cell(String(m.access_count), "num" + (m.access_count === 0 ? " zero" : "")));
+  tr.appendChild(cell(fmtDate(m.last_accessed)));
+  tr.appendChild(cell(fmtDate(m.created_at)));
+  tr.appendChild(cell(m.project_dir || "—", "mono"));
+  tr.appendChild(cell(m.source_session || "—", "mono"));
+
+  const act = el("td");
+  const edit = el("button", "act", "Importance"); edit.onclick = () => editImportance(m);
+  const forget = el("button", "act warn", "Forget"); forget.onclick = () => forgetMemory(m);
+  act.append(edit, document.createTextNode(" "), forget);
+  tr.appendChild(act);
+  return tr;
+}
+
+function renderRows(items) {
+  const tb = document.getElementById("rows");
+  if (!items.length) {
+    const tr = el("tr"), td = el("td", "empty", "No memories match this view.");
+    td.colSpan = 10; tr.appendChild(td); tb.replaceChildren(tr);
+    return;
+  }
+  tb.replaceChildren(...items.map(buildRow));
+}
+
+async function loadList() {
+  try {
+    const data = await api("/memories?" + q(state));
+    renderRows(data.results);
+    document.getElementById("page").textContent = `${data.count} shown · offset ${state.offset}`;
+    document.getElementById("prev").disabled = state.offset === 0;
+    document.getElementById("next").disabled = data.count < state.limit;
+  } catch (e) { setStatus("Failed to load list: " + e.message, true); }
+}
+async function reload() { await Promise.all([loadStats(), loadList()]); }
+
+// ---- mutations: every one is confirmed ------------------------------------
+async function forgetMemory(m) {
+  if (!confirm(`Archive (forget) this memory?\n\n"${(m.content || "").slice(0, 120)}"\n\nIt moves to the archived tier and leaves the default view. This is NOT a hard delete.`)) return;
+  try {
+    const res = await api(`/memories/${encodeURIComponent(m.id)}`, { method: "DELETE" });
+    // A missing id returns HTTP 200 with action != "archived" — don't report
+    // that as success.
+    if (res && res.action === "archived") setStatus(`Archived ${m.id}.`);
+    else setStatus(`Could not archive ${m.id}: ${(res && (res.error || res.action)) || "unknown"}`, true);
+    await reload();
+  } catch (e) { setStatus("Forget failed: " + e.message, true); }
+}
+async function editImportance(m) {
+  const raw = prompt("New importance for this memory (0–10):", Number(m.importance).toFixed(1));
+  if (raw === null) return;
+  if (raw.trim() === "") { setStatus("Importance cannot be empty.", true); return; }
+  const val = Number(raw);
+  if (Number.isNaN(val) || !(val >= 0 && val <= 10)) {
+    setStatus("Importance must be a number between 0 and 10.", true); return;
+  }
+  if (!confirm(`Set importance to ${val}?`)) return;
+  try {
+    const res = await api(`/memories/${encodeURIComponent(m.id)}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ importance: val }),
+    });
+    // A missing id returns HTTP 200 with updated:false — surface that.
+    if (res && res.updated) { setStatus(`Updated ${m.id} → importance ${val}.`); await reload(); }
+    else setStatus(`Update failed for ${m.id}: ${(res && res.error) || "not updated"}`, true);
+  } catch (e) { setStatus("Update failed: " + e.message, true); }
+}
+
+// ---- controls -------------------------------------------------------------
+// All chips view the LIVE corpus (archived excluded), matching the live
+// header stats. Archived rows are reachable via the tier=archived dropdown.
+const PRESETS = {
+  all:      { filter: null, sort: "created_at", order: "desc", limit: 50, include_archived: false },
+  never:    { filter: "never_retrieved", sort: "created_at", order: "desc", limit: 50, include_archived: false },
+  top15:    { filter: null, sort: "access_count", order: "desc", limit: 15, include_archived: false },
+  unscoped: { filter: "unscoped", sort: "created_at", order: "desc", limit: 50, include_archived: false },
+};
+function applyPreset(name, btn) {
+  Object.assign(state, PRESETS[name], { offset: 0 });
+  document.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c === btn));
+  syncSortHeaders(); reload();
+}
+function syncSortHeaders() {
+  document.querySelectorAll("th.sortable").forEach(th => th.classList.toggle("on", th.dataset.sort === state.sort));
+}
+document.querySelectorAll(".chip").forEach(btn => btn.addEventListener("click", () => applyPreset(btn.dataset.preset, btn)));
+document.querySelectorAll("th.sortable").forEach(th => th.addEventListener("click", () => {
+  if (state.sort === th.dataset.sort) state.order = state.order === "desc" ? "asc" : "desc";
+  else { state.sort = th.dataset.sort; state.order = "desc"; }
+  state.offset = 0; syncSortHeaders(); loadList();
+}));
+document.getElementById("tier").addEventListener("change", e => { state.tier = e.target.value; state.offset = 0; loadList(); });
+document.getElementById("type").addEventListener("change", e => { state.type = e.target.value; state.offset = 0; loadList(); });
+document.getElementById("prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadList(); });
+document.getElementById("next").addEventListener("click", () => { state.offset += state.limit; loadList(); });
+
+// init
+document.querySelector('.chip[data-preset="all"]').classList.add("active");
+syncSortHeaders();
+reload();
+</script>
+</body>
+</html>
