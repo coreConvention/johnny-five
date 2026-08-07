@@ -84,8 +84,10 @@ def _search_result_to_dict(result: SearchResult) -> dict:
         "importance_score": round(result.importance_score, 4),
         "lexical_score": round(result.lexical_score, 4),
         "project_dir": result.memory.project_dir,
+        "source_session": result.memory.source_session,
         "created_at": result.memory.created_at,
         "updated_at": result.memory.updated_at,
+        "last_accessed": result.memory.last_accessed,
         "access_count": result.memory.access_count,
     }
 
@@ -112,9 +114,44 @@ def _search_result_to_summary_dict(result: SearchResult) -> dict:
         "score": round(result.score, 4),
         "preview": preview,
         "project_dir": result.memory.project_dir,
+        "source_session": result.memory.source_session,
         "created_at": result.memory.created_at,
         "updated_at": result.memory.updated_at,
+        "last_accessed": result.memory.last_accessed,
         "access_count": result.memory.access_count,
+    }
+
+
+def _memory_why_dict(record: MemoryRecord) -> dict:
+    """Provenance + lineage view of a memory — the "why do I know this?" read.
+
+    Deliberately **excludes** ``content``: this is a provenance surface, not a
+    content read, so it never echoes (potentially sensitive) memory text into a
+    response that might get logged. Returns only the audit/lineage fields —
+    ``source_session``, ``created_at``, ``last_accessed``, ``access_count`` and
+    the ``supersedes`` / ``consolidated_from`` graph.
+
+    ``consolidated_from`` is normalised to a ``list`` the same way ``tags`` is
+    in :func:`_search_result_to_dict`: consolidation-written rows store this
+    column double-encoded (``run_consolidation`` json-dumps the id list and
+    ``insert_memory`` dumps it again), so after one decode in ``_row_to_record``
+    it round-trips as a JSON *string*. Without this guard the lineage field —
+    the whole point of ``memory_why`` — would be a string that consumers iterate
+    character-by-character.
+    """
+    consolidated_from = (
+        record.consolidated_from
+        if isinstance(record.consolidated_from, list)
+        else json.loads(record.consolidated_from or "[]")
+    )
+    return {
+        "id": record.id,
+        "source_session": record.source_session,
+        "created_at": record.created_at,
+        "last_accessed": record.last_accessed,
+        "access_count": record.access_count,
+        "supersedes": record.supersedes,
+        "consolidated_from": consolidated_from,
     }
 
 
@@ -206,10 +243,10 @@ async def tool_memory_search(
         Top-1 result is always returned even if it alone exceeds the budget.
     summary_only:
         When True, returns compact results (id, type, tags, importance, tier,
-        score, 200-char preview, project_dir, timestamps, access_count) without
-        the full ``content`` field.  Use for two-pass retrieval: first call with
-        summary_only=True to find relevant IDs cheaply, then fetch full content
-        with memory_get for selected results.
+        score, 200-char preview, project_dir, source_session, timestamps,
+        access_count) without the full ``content`` field.  Use for two-pass
+        retrieval: first call with summary_only=True to find relevant IDs
+        cheaply, then fetch full content with memory_get for selected results.
     tags:
         Optional list of tags that ALL returned memories must possess. Strict
         AND filter applied before ranking (so token_budget respects it).
@@ -410,11 +447,44 @@ async def tool_memory_consolidate() -> dict:
 async def tool_memory_stats() -> dict:
     """Return database statistics.
 
-    Returns counts grouped by memory type, tier, and total.
+    Returns counts grouped by memory type and tier, the total, and the Tier A
+    audit headline signals: ``never_retrieved`` (access_count = 0), ``unscoped``
+    (project_dir IS NULL), and ``top_n_share`` (retrieval concentration).
     """
     conn, _, settings = _get_deps()
     try:
         return get_stats(conn)
+    finally:
+        conn.close()
+
+
+async def tool_memory_why(memory_id: str) -> dict:
+    """Explain why a memory is known — return its provenance and lineage.
+
+    A thin, read-only inspection of a single memory: returns ``source_session``,
+    ``created_at``, ``last_accessed``, ``access_count`` and the
+    ``supersedes`` / ``consolidated_from`` lineage graph. Does **not** return
+    ``content`` and does **not** bump ``access_count`` — inspecting a memory
+    must not count as retrieving it, or it would pollute the very
+    retrieval-frequency signal this surface exists to expose.
+
+    Parameters
+    ----------
+    memory_id:
+        The ID of the memory to explain.
+
+    Returns
+    -------
+    dict
+        ``{"found": True, ...lineage...}`` when the memory exists, otherwise
+        ``{"found": False, "id": memory_id, "error": "Memory not found"}``.
+    """
+    conn, _, _ = _get_deps()
+    try:
+        record: MemoryRecord | None = get_memory(conn, memory_id)
+        if record is None:
+            return {"found": False, "id": memory_id, "error": "Memory not found"}
+        return {"found": True, **_memory_why_dict(record)}
     finally:
         conn.close()
 

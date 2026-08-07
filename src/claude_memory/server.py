@@ -5,8 +5,8 @@ Run via::
     python -m claude_memory.server          # stdio transport (default)
     python -m claude_memory.server --transport sse --port 8787
 
-The server exposes eight tools for storing, searching, updating, and
-managing memories, plus resource endpoints for browsing the database.
+The server exposes nine tools for storing, searching, updating, inspecting,
+and managing memories, plus resource endpoints for browsing the database.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from claude_memory.mcp.tools import (
     tool_memory_stats,
     tool_memory_store,
     tool_memory_update,
+    tool_memory_why,
 )
 
 app = Server("claude-memory")
@@ -267,12 +268,33 @@ async def list_tools() -> list[Tool]:
             name="memory_stats",
             description=(
                 "Return database statistics including total count and "
-                "breakdowns by memory type and tier."
+                "breakdowns by memory type and tier, plus the audit signals "
+                "never_retrieved, unscoped, and top_n_share (retrieval "
+                "concentration)."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {},
                 "required": [],
+            },
+        ),
+        Tool(
+            name="memory_why",
+            description=(
+                "Explain why a memory is known: return its provenance and "
+                "lineage — source_session, created_at, last_accessed, "
+                "access_count, and the supersedes/consolidated_from graph. "
+                "Read-only, does not count as a retrieval, and excludes content."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The ID of the memory to explain",
+                    },
+                },
+                "required": ["memory_id"],
             },
         ),
         Tool(
@@ -306,6 +328,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         "memory_forget": tool_memory_forget,
         "memory_consolidate": tool_memory_consolidate,
         "memory_stats": tool_memory_stats,
+        "memory_why": tool_memory_why,
         "memory_aging": tool_memory_aging,
     }
 

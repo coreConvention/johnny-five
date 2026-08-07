@@ -331,10 +331,27 @@ def get_memories_by_tier(
 # ── Analytics / maintenance ──────────────────────────────────────────────
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
-    """Return aggregate counts grouped by type and tier.
+def get_stats(conn: sqlite3.Connection, top_n: int = 15) -> dict:
+    """Return aggregate counts plus the Tier A audit headline signals.
 
-    Returns a dict with keys ``by_type``, ``by_tier``, and ``total``.
+    Keys: ``by_type``, ``by_tier``, ``total`` (existing) and — added for A2
+    observability — ``never_retrieved``, ``unscoped``, ``top_n_share``.
+
+    - ``never_retrieved``: memories with ``access_count = 0`` (dead weight the
+      audit prunes — 29% of the corpus at last measure).
+    - ``unscoped``: memories with ``project_dir IS NULL`` (global rows that leak
+      across every project's recall).
+    - ``top_n_share``: fraction of *all retrievals* (the sum of ``access_count``)
+      concentrated in the ``top_n`` most-retrieved memories — the audit's
+      concentration signal. ``0.0`` when nothing has been retrieved yet
+      (guards against divide-by-zero on a cold corpus).
+
+    Parameters
+    ----------
+    top_n:
+        Size of the retrieval-concentration head (default 15 — the audit's
+        headline cohort). Denominator is always the *total* retrieval count,
+        never the memory count.
     """
     type_rows = conn.execute(
         "SELECT type, COUNT(*) AS cnt FROM memories GROUP BY type"
@@ -344,10 +361,41 @@ def get_stats(conn: sqlite3.Connection) -> dict:
     ).fetchall()
     total_row = conn.execute("SELECT COUNT(*) AS cnt FROM memories").fetchone()
 
+    never_retrieved_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM memories WHERE access_count = 0"
+    ).fetchone()
+    unscoped_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM memories WHERE project_dir IS NULL"
+    ).fetchone()
+
+    total_accesses_row = conn.execute(
+        "SELECT COALESCE(SUM(access_count), 0) AS s FROM memories"
+    ).fetchone()
+    total_accesses: int = total_accesses_row["s"] if total_accesses_row else 0
+
+    top_n_row = conn.execute(
+        """\
+        SELECT COALESCE(SUM(access_count), 0) AS s FROM (
+            SELECT access_count FROM memories
+            ORDER BY access_count DESC
+            LIMIT ?
+        )
+        """,
+        (top_n,),
+    ).fetchone()
+    top_n_accesses: int = top_n_row["s"] if top_n_row else 0
+
+    top_n_share: float = (
+        round(top_n_accesses / total_accesses, 4) if total_accesses > 0 else 0.0
+    )
+
     return {
         "by_type": {row["type"]: row["cnt"] for row in type_rows},
         "by_tier": {row["tier"]: row["cnt"] for row in tier_rows},
         "total": total_row["cnt"] if total_row else 0,
+        "never_retrieved": never_retrieved_row["cnt"] if never_retrieved_row else 0,
+        "unscoped": unscoped_row["cnt"] if unscoped_row else 0,
+        "top_n_share": top_n_share,
     }
 
 
