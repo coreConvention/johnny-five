@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from claude_memory.db.queries import ListQueryError
+from claude_memory.lifecycle.consolidation import ReconciliationError
 from claude_memory.mcp.tools import (
     tool_memory_aging,
     tool_memory_consolidate,
@@ -21,6 +22,8 @@ from claude_memory.mcp.tools import (
     tool_memory_store,
     tool_memory_update,
     tool_memory_why,
+    tool_reconciliation_apply,
+    tool_reconciliation_candidates,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["memory"])
@@ -151,6 +154,13 @@ class MemoryListResponse(BaseModel):
     count: int
 
 
+class ReconcileApplyRequest(BaseModel):
+    """Payload confirming one reconciliation: keep ``newer``, supersede+archive ``older``."""
+
+    newer_id: str
+    older_id: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -251,6 +261,36 @@ async def why(memory_id: str) -> dict:
     if not result.get("found", False):
         raise HTTPException(status_code=404, detail="Memory not found")
     return result
+
+
+@router.get("/reconciliation/candidates")
+async def reconciliation_candidates(
+    limit: int = Query(100, ge=1, le=500),
+    similarity_threshold: float = Query(0.85, ge=0.0, le=1.0),
+) -> dict:
+    """List contradiction-reconciliation candidates (A3) — read-only.
+
+    High-similarity, diverging pairs surfaced for human review; nothing is
+    superseded until an explicit confirm hits ``POST /reconciliation/apply``.
+    """
+    return await tool_reconciliation_candidates(
+        similarity_threshold=similarity_threshold, limit=limit
+    )
+
+
+@router.post("/reconciliation/apply")
+async def reconciliation_apply(request: ReconcileApplyRequest) -> dict:
+    """Apply a human-confirmed reconciliation: newer supersedes older, older archived.
+
+    Never hard-deletes. Returns 400 on an invalid request (unknown id, pinned,
+    already-archived older, or inverted direction).
+    """
+    try:
+        return await tool_reconciliation_apply(
+            newer_id=request.newer_id, older_id=request.older_id
+        )
+    except ReconciliationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/maintenance/consolidate")

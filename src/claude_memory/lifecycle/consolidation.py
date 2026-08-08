@@ -14,6 +14,8 @@ from ulid import ULID
 from claude_memory.db.queries import (
     MemoryRecord,
     get_memories_by_tier,
+    get_memory,
+    get_non_archived_memories,
     insert_memory,
     update_memory,
 )
@@ -28,6 +30,23 @@ class ConsolidationReport:
     memories_consolidated: int
     memories_archived: int
     new_summaries_created: int
+
+
+def _is_pinned(memory: MemoryRecord) -> bool:
+    """Return ``True`` if *memory* carries the ``forever-keep`` tag.
+
+    Pinned memories are never merged, archived, or reconciled — their content
+    must stay addressable as-is. ``tags`` may be a list or a JSON string.
+    """
+    tags = memory.tags
+    if isinstance(tags, list):
+        return "forever-keep" in tags
+    if isinstance(tags, str) and tags:
+        try:
+            return "forever-keep" in json.loads(tags)
+        except Exception:
+            return False
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -238,17 +257,6 @@ def run_consolidation(
     # Exclude forever-keep memories from consolidation. Even if they landed
     # in cold (e.g. the tag was added AFTER the memory aged in), we refuse
     # to merge or archive them — their content must stay addressable as-is.
-    def _is_pinned(memory: MemoryRecord) -> bool:
-        tags = memory.tags
-        if isinstance(tags, list):
-            return "forever-keep" in tags
-        if isinstance(tags, str) and tags:
-            try:
-                return "forever-keep" in json.loads(tags)
-            except Exception:
-                return False
-        return False
-
     cold_memories: list[MemoryRecord] = [
         m for m in cold_memories_all if not _is_pinned(m)
     ]
@@ -382,3 +390,204 @@ def run_consolidation(
         memories_archived=total_archived,
         new_summaries_created=new_summaries,
     )
+
+
+# ---------------------------------------------------------------------------
+# Contradiction reconciliation (A3) — human-confirmed supersede + archive
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ReconciliationCandidate:
+    """A high-similarity, diverging pair proposed for human-confirmed supersede.
+
+    ``newer_id`` (the more recently updated memory) would supersede and archive
+    ``older_id``. Detection is read-only; nothing is applied without an explicit
+    confirm via :func:`apply_reconciliation`.
+    """
+
+    newer_id: str
+    older_id: str
+    similarity: float
+
+
+class ReconciliationError(ValueError):
+    """Raised for an invalid reconciliation request.
+
+    Unknown id, a pinned (``forever-keep``) memory, an already-archived older, or
+    an inverted direction (``newer_id`` is not the more recent of the pair). A
+    subclass of ``ValueError`` so the REST layer can map it to HTTP 400.
+    """
+
+
+def _decode_embedding(raw: object) -> list[float] | None:
+    """Decode a stored embedding, tolerating vec0 bytes / JSON text / list form.
+
+    Returns ``None`` on any malformed value (bad bytes length, non-JSON text) so
+    a single corrupt row can't crash a whole reconciliation scan.
+    """
+    try:
+        if isinstance(raw, bytes):
+            return np.frombuffer(raw, dtype=np.float32).tolist()
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return list(raw)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_embeddings(
+    conn: sqlite3.Connection, ids: list[str]
+) -> dict[str, list[float]]:
+    """Batch-read embeddings for *ids* in a single query (avoids N point SELECTs)."""
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id, embedding FROM memories_vec WHERE id IN ({placeholders})",  # noqa: S608
+        ids,
+    ).fetchall()
+    out: dict[str, list[float]] = {}
+    for row in rows:
+        mid = row["id"] if isinstance(row, sqlite3.Row) else row[0]
+        raw = row["embedding"] if isinstance(row, sqlite3.Row) else row[1]
+        vec = _decode_embedding(raw)
+        if vec is not None:
+            out[mid] = vec
+    return out
+
+
+def _parse_ts(ts: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp to an aware/naive datetime, or ``None``.
+
+    Comparing parsed datetimes (not raw strings) makes ordering correct across
+    heterogeneous ISO formats (``Z`` vs ``+00:00``, differing offsets/precision).
+    """
+    try:
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def find_reconciliation_candidates(
+    conn: sqlite3.Connection,
+    similarity_threshold: float = 0.85,
+    limit: int = 100,
+) -> list[ReconciliationCandidate]:
+    """Detect near-duplicate / contradictory pairs among LIVE memories.
+
+    Read-only. Reuses the same cosine machinery as :func:`find_clusters`, at the
+    PAIR level (a supersede is pairwise). A pair ``(a, b)`` is a candidate when:
+
+    - cosine similarity >= *similarity_threshold* (default 0.85 — the system's
+      own near-duplicate bar, i.e. dedup's ``0.15`` cosine distance; the 0.75
+      clustering threshold is for non-destructive 3+ merges and is too loose for
+      a destructive pairwise supersede),
+    - they have DISTINCT ``created_at`` (a clear newer to keep / older to
+      supersede). **Direction uses ``created_at``, which is immutable — NOT
+      ``updated_at``, which the aging cycle rewrites and would invert stale vs
+      current** (a stale memory not accessed today gets a fresh ``updated_at``),
+    - neither is pinned (``forever-keep``), and
+    - the newer does not already supersede something (single-valued link).
+
+    Candidates are sorted by descending similarity and capped at *limit*. This
+    NEVER mutates — application is a separate, human-confirmed step
+    (:func:`apply_reconciliation`); nothing is auto-superseded.
+    """
+    memories = [m for m in get_non_archived_memories(conn) if not _is_pinned(m)]
+    if len(memories) < 2:
+        return []
+
+    embeddings = _read_embeddings(conn, [m.id for m in memories])
+    if len(embeddings) < 2:
+        return []
+
+    # Guard a mixed-model corpus: keep only the dominant embedding dimension so
+    # ragged vectors can't crash np.array (reconciliation scans ALL live tiers,
+    # unlike run_consolidation's cold-only set).
+    target_dim = Counter(len(v) for v in embeddings.values()).most_common(1)[0][0]
+    embeddings = {k: v for k, v in embeddings.items() if len(v) == target_dim}
+
+    embeddable = [m for m in memories if m.id in embeddings]
+    if len(embeddable) < 2:
+        return []
+
+    ids: list[str] = [m.id for m in embeddable]
+    by_id: dict[str, MemoryRecord] = {m.id: m for m in embeddable}
+    vectors: np.ndarray = np.array([embeddings[i] for i in ids], dtype=np.float32)
+    sim: np.ndarray = _cosine_similarity_matrix(vectors)
+
+    # Vectorized: only the above-threshold upper-triangle pairs, so the Python
+    # loop runs over the (few) real candidates rather than every N^2 pair.
+    candidates: list[ReconciliationCandidate] = []
+    for i, j in np.argwhere(np.triu(sim >= similarity_threshold, k=1)):
+        i, j = int(i), int(j)
+        a, b = by_id[ids[i]], by_id[ids[j]]
+        ca, cb = _parse_ts(a.created_at), _parse_ts(b.created_at)
+        if ca is None or cb is None or ca == cb:
+            continue  # no clear / parseable newer
+        newer, older = (a, b) if ca > cb else (b, a)
+        if newer.supersedes is not None or older.supersedes == newer.id:
+            continue  # already reconciled / newer already supersedes something
+        candidates.append(
+            ReconciliationCandidate(
+                newer_id=newer.id,
+                older_id=older.id,
+                similarity=round(float(sim[i, j]), 4),
+            )
+        )
+
+    candidates.sort(key=lambda c: c.similarity, reverse=True)
+    return candidates[:limit]
+
+
+def apply_reconciliation(
+    conn: sqlite3.Connection,
+    newer_id: str,
+    older_id: str,
+) -> dict:
+    """Apply a HUMAN-CONFIRMED reconciliation: newer supersedes older, older archived.
+
+    The only mutating half of A3; call it only after an explicit confirm. It
+    NEVER hard-deletes — the older moves to the ``archived`` tier and
+    ``newer.supersedes`` records the lineage (resolvable via ``memory_why``).
+
+    Raises :class:`ReconciliationError` (HTTP 400) on: a self-pair; an unknown
+    id; a pinned memory; an archived ``newer`` (would keep an invisible memory)
+    or already-archived ``older``; a ``newer`` that already supersedes something
+    (would clobber lineage); or a non-strict direction — the kept memory must be
+    strictly newer by **created_at** (immutable), so we never archive the newer.
+    """
+    if newer_id == older_id:
+        raise ReconciliationError("newer_id and older_id must differ")
+    newer = get_memory(conn, newer_id)
+    if newer is None:
+        raise ReconciliationError(f"memory not found: {newer_id}")
+    older = get_memory(conn, older_id)
+    if older is None:
+        raise ReconciliationError(f"memory not found: {older_id}")
+    if _is_pinned(newer) or _is_pinned(older):
+        raise ReconciliationError("cannot reconcile a forever-keep (pinned) memory")
+    if newer.tier == "archived":
+        raise ReconciliationError(f"{newer_id} (the kept memory) is archived")
+    if older.tier == "archived":
+        raise ReconciliationError(f"{older_id} is already archived")
+    if newer.supersedes is not None:
+        raise ReconciliationError(
+            f"{newer_id} already supersedes {newer.supersedes}; would overwrite lineage"
+        )
+    cn, co = _parse_ts(newer.created_at), _parse_ts(older.created_at)
+    if cn is None or co is None:
+        raise ReconciliationError("unparseable created_at on one of the memories")
+    if cn <= co:
+        raise ReconciliationError(
+            "direction invalid: newer_id must be strictly newer (by created_at)"
+        )
+
+    update_memory(conn, newer_id, supersedes=older_id)
+    update_memory(conn, older_id, tier="archived")
+    return {
+        "reconciled": True,
+        "superseded": older_id,
+        "superseded_by": newer_id,
+    }

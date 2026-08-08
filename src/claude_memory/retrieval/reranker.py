@@ -313,6 +313,15 @@ def rerank(
             # Memory was deleted after the search indices returned it.
             continue
 
+        # Archived is the terminal "removed" tier — never retrievable, even if
+        # flagged always-load. This is what makes an A3 reconciliation
+        # (supersede + archive the older) actually stop the superseded memory
+        # surfacing in search/recall; it also keeps consolidation's archived
+        # originals out of results. Only get_always_load excluded archived
+        # before, so vec/FTS candidates could still resurface it.
+        if getattr(record, "tier", "hot") == "archived":
+            continue
+
         semantic_sim: float = _semantic_similarity_from_candidate(candidate)
 
         # --- Tier-aware filtering -------------------------------------------
