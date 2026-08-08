@@ -329,12 +329,15 @@ def run_consolidation(
         merged_tags: list[str] = list(dict.fromkeys(all_tags))
 
         new_id: str = str(ULID())
+        # insert_memory owns JSON encoding of tags/consolidated_from/metadata,
+        # so pass native list/dict here — pre-dumping double-encodes them and
+        # yields type-unstable rows on read-back (issue #11).
         consolidated_record = MemoryRecord(
             id=new_id,
             content=summary_text,
             summary=None,
             type=majority_type,
-            tags=json.dumps(merged_tags),
+            tags=merged_tags,
             created_at=now,
             updated_at=now,
             last_accessed=now,
@@ -344,8 +347,8 @@ def run_consolidation(
             project_dir=cluster_memories[0].project_dir,
             source_session=None,
             supersedes=None,
-            consolidated_from=json.dumps(cluster_ids),
-            metadata=json.dumps({}),
+            consolidated_from=cluster_ids,
+            metadata={},
         )
 
         insert_memory(conn, consolidated_record, summary_embedding)
