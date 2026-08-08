@@ -61,6 +61,17 @@
   .foot { display: flex; gap: 10px; align-items: center; padding: 12px 2px; color: var(--muted); font-size: 12.5px; }
   .status { min-height: 18px; padding: 4px 22px; color: var(--accent); font-size: 12.5px; }
   .empty { padding: 26px; text-align: center; color: var(--muted); }
+  .cand { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; box-shadow: var(--shadow); overflow: hidden; }
+  .cand-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .sim { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cand-cols { display: grid; grid-template-columns: 1fr 1fr; }
+  .side { padding: 10px 12px; }
+  .side.supersede { background: color-mix(in srgb, var(--warn) 7%, transparent); border-left: 1px solid var(--line); }
+  .side .role { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin-bottom: 4px; }
+  .side.keep .role { color: var(--accent); }
+  .side.supersede .role { color: var(--warn); }
+  .side .meta { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  @media (max-width: 640px) { .cand-cols { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -75,6 +86,7 @@
   <button class="chip" data-preset="never">Never retrieved</button>
   <button class="chip" data-preset="top15">Top 15 retrieved</button>
   <button class="chip" data-preset="unscoped">Unscoped</button>
+  <button class="chip" data-preset="reconcile">⚖ Reconcile</button>
   <span class="spacer"></span>
   <label>tier
     <select id="tier">
@@ -92,7 +104,7 @@
 
 <div class="status" id="status"></div>
 
-<div class="wrap">
+<div class="wrap" id="browseWrap">
   <table>
     <thead>
       <tr>
@@ -115,6 +127,14 @@
     <span id="page"></span>
     <button class="act" id="next">Next ›</button>
   </div>
+</div>
+
+<div class="wrap" id="reconcileWrap" hidden>
+  <p class="sub" style="padding:2px 0 10px">
+    Near-duplicate / contradictory pairs on the live corpus. Confirming keeps the
+    newer memory and supersedes + archives the older (never a hard delete).
+  </p>
+  <div id="candidates"></div>
 </div>
 
 <script>
@@ -218,6 +238,64 @@ async function loadList() {
 }
 async function reload() { await Promise.all([loadStats(), loadList()]); }
 
+// ---- reconciliation (A3) --------------------------------------------------
+function sideBlock(side, role) {
+  const d = el("div", "side " + role);
+  d.append(el("div", "role", role === "keep" ? "Keep · newer" : "Supersede · older"));
+  d.append(el("div", "preview", side.preview || ""));
+  d.append(el("div", "meta",
+    `${side.type} · ${side.tier} · imp ${Number(side.importance).toFixed(1)} · acc ${side.access_count} · created ${fmtDate(side.created_at)}`));
+  d.append(el("div", "mono", side.id));
+  return d;
+}
+function renderCandidates(cands) {
+  const box = document.getElementById("candidates");
+  if (!cands.length) {
+    box.replaceChildren(el("div", "empty",
+      "No reconciliation candidates — no near-duplicate / diverging pairs on the live corpus."));
+    return;
+  }
+  box.replaceChildren(...cands.map(c => {
+    const card = el("div", "cand");
+    const head = el("div", "cand-head");
+    head.append(el("span", "sim", `similarity ${(c.similarity * 100).toFixed(0)}%`));
+    const btn = el("button", "act warn", "Supersede older → archive");
+    btn.onclick = () => reconcile(c);
+    head.append(btn);
+    const cols = el("div", "cand-cols");
+    cols.append(sideBlock(c.newer, "keep"), sideBlock(c.older, "supersede"));
+    card.append(head, cols);
+    return card;
+  }));
+}
+async function loadCandidates() {
+  const box = document.getElementById("candidates");
+  box.replaceChildren(el("div", "empty", "Scanning the live corpus for contradictions…"));
+  try {
+    const data = await api("/reconciliation/candidates?limit=100");
+    renderCandidates(data.candidates);
+  } catch (e) { setStatus("Failed to load candidates: " + e.message, true); }
+}
+async function reconcile(c) {
+  if (!confirm(
+    `Supersede the OLDER memory with the NEWER?\n\n` +
+    `KEEP (newer ${c.newer.id}): "${(c.newer.preview || "").slice(0, 90)}"\n` +
+    `ARCHIVE (older ${c.older.id}): "${(c.older.preview || "").slice(0, 90)}"\n\n` +
+    `The older moves to the archived tier and stops being retrieved; lineage is ` +
+    `preserved (newer supersedes older). This is NOT a hard delete.`
+  )) return;
+  try {
+    const res = await api("/reconciliation/apply", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ newer_id: c.newer.id, older_id: c.older.id }),
+    });
+    if (res && res.reconciled) {
+      setStatus(`Superseded ${c.older.id} with ${c.newer.id}; older archived.`);
+      await loadCandidates(); loadStats();
+    } else setStatus("Reconcile did not apply.", true);
+  } catch (e) { setStatus("Reconcile failed: " + e.message, true); }
+}
+
 // ---- mutations: every one is confirmed ------------------------------------
 async function forgetMemory(m) {
   if (!confirm(`Archive (forget) this memory?\n\n"${(m.content || "").slice(0, 120)}"\n\nIt moves to the archived tier and leaves the default view. This is NOT a hard delete.`)) return;
@@ -260,8 +338,12 @@ const PRESETS = {
   unscoped: { filter: "unscoped", sort: "created_at", order: "desc", limit: 50, include_archived: false },
 };
 function applyPreset(name, btn) {
-  Object.assign(state, PRESETS[name], { offset: 0 });
   document.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c === btn));
+  const reconciling = name === "reconcile";
+  document.getElementById("browseWrap").hidden = reconciling;
+  document.getElementById("reconcileWrap").hidden = !reconciling;
+  if (reconciling) { loadCandidates(); return; }
+  Object.assign(state, PRESETS[name], { offset: 0 });
   syncSortHeaders(); reload();
 }
 function syncSortHeaders() {

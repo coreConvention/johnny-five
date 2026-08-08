@@ -22,7 +22,12 @@ from claude_memory.db.queries import (
 )
 from claude_memory.embeddings.encoder import EmbeddingEncoder, get_encoder
 from claude_memory.lifecycle.aging import AgingReport, run_aging_cycle
-from claude_memory.lifecycle.consolidation import ConsolidationReport, run_consolidation
+from claude_memory.lifecycle.consolidation import (
+    ConsolidationReport,
+    apply_reconciliation,
+    find_reconciliation_candidates,
+    run_consolidation,
+)
 from claude_memory.lifecycle.dedup import DedupResult, store_with_dedup
 from claude_memory.retrieval.scorer import ScoringWeights
 from claude_memory.retrieval.search import (
@@ -147,6 +152,29 @@ def _record_to_list_dict(record: MemoryRecord) -> dict:
         "last_accessed": record.last_accessed,
         "created_at": record.created_at,
         "source_session": record.source_session,
+        "project_dir": record.project_dir,
+    }
+
+
+def _reconcile_side(record: MemoryRecord) -> dict:
+    """Serialize one side of a reconciliation candidate for the dashboard.
+
+    A ~200-char preview (not full content) plus the fields a human needs to
+    judge which memory is stale: type, tier, importance, updated_at, access.
+    """
+    content = record.content or ""
+    preview = content[:200] + "..." if len(content) > 200 else content
+    return {
+        "id": record.id,
+        "preview": preview,
+        "type": record.type,
+        "tier": record.tier,
+        "importance": record.importance,
+        # created_at is the direction basis (immutable). updated_at is included
+        # for context but is NOT the keep/supersede signal (aging rewrites it).
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "access_count": record.access_count,
         "project_dir": record.project_dir,
     }
 
@@ -469,6 +497,56 @@ async def tool_memory_consolidate() -> dict:
         )
         conn.commit()
         return asdict(report)
+    finally:
+        conn.close()
+
+
+async def tool_reconciliation_candidates(
+    similarity_threshold: float = 0.85,
+    limit: int = 100,
+) -> dict:
+    """Return contradiction-reconciliation candidates (A3) — read-only.
+
+    Surfaces high-similarity, diverging pairs for HUMAN review. Nothing is
+    superseded here; the human confirms via ``tool_reconciliation_apply``. Each
+    candidate carries the ``newer`` (kept) and ``older`` (would-be-superseded)
+    sides with previews so the reviewer can judge.
+    """
+    conn, _, _ = _get_deps()
+    try:
+        candidates = find_reconciliation_candidates(
+            conn, similarity_threshold=similarity_threshold, limit=limit
+        )
+        results: list[dict] = []
+        for c in candidates:
+            newer = get_memory(conn, c.newer_id)
+            older = get_memory(conn, c.older_id)
+            if newer is None or older is None:
+                continue
+            results.append(
+                {
+                    "similarity": c.similarity,
+                    "newer": _reconcile_side(newer),
+                    "older": _reconcile_side(older),
+                }
+            )
+        return {"candidates": results, "count": len(results)}
+    finally:
+        conn.close()
+
+
+async def tool_reconciliation_apply(newer_id: str, older_id: str) -> dict:
+    """Apply a HUMAN-CONFIRMED reconciliation: newer supersedes older, older archived.
+
+    Mutating; must be called only after an explicit confirm. Never hard-deletes.
+    Raises ``ReconciliationError`` (mapped to HTTP 400 by the route) on an
+    invalid request (unknown id, pinned, already-archived, inverted direction).
+    """
+    conn, _, _ = _get_deps()
+    try:
+        result = apply_reconciliation(conn, newer_id, older_id)
+        conn.commit()
+        return result
     finally:
         conn.close()
 

@@ -328,6 +328,18 @@ def get_memories_by_tier(
     return [_row_to_record(row) for row in rows]
 
 
+def get_non_archived_memories(conn: sqlite3.Connection) -> list[MemoryRecord]:
+    """Return every live (non-archived) memory.
+
+    The scan set for reconciliation-candidate detection (A3): archived rows are
+    already the pruned state, so they are never reconciliation targets.
+    """
+    rows = conn.execute(
+        "SELECT * FROM memories WHERE tier != 'archived'"
+    ).fetchall()
+    return [_row_to_record(row) for row in rows]
+
+
 # ── List / browse (dashboard, A1) ─────────────────────────────────────────
 
 
