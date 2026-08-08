@@ -328,6 +328,113 @@ def get_memories_by_tier(
     return [_row_to_record(row) for row in rows]
 
 
+# ── List / browse (dashboard, A1) ─────────────────────────────────────────
+
+
+class ListQueryError(ValueError):
+    """Raised for an invalid ``list_memories`` sort/order/filter argument.
+
+    A subclass of :class:`ValueError` so callers may catch it *specifically* —
+    distinct from a :class:`json.JSONDecodeError` (also a ``ValueError``) raised
+    while decoding a corrupt row. The former is a bad request (HTTP 400); the
+    latter is a server-data fault (HTTP 500) and must not be mislabelled.
+    """
+
+
+# Whitelists: user-supplied sort/order/filter are MAPPED to these fixed SQL
+# fragments — never string-interpolated. Anything not present raises ValueError.
+# tier/type values are always passed as bound parameters. This is the sole SQL
+# injection barrier for the dashboard's browse endpoint.
+_LIST_SORT_COLUMNS: dict[str, str] = {
+    "access_count": "access_count",
+    "importance": "importance",
+    "created_at": "created_at",
+    "last_accessed": "last_accessed",
+}
+_LIST_ORDERS: dict[str, str] = {"asc": "ASC", "desc": "DESC"}
+_LIST_PRESET_FILTERS: dict[str, str] = {
+    "never_retrieved": "access_count = 0",
+    "unscoped": "project_dir IS NULL",
+}
+
+
+def list_memories(
+    conn: sqlite3.Connection,
+    *,
+    sort: str = "created_at",
+    order: str = "desc",
+    filter: str | None = None,
+    tier: str | None = None,
+    type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    include_archived: bool = False,
+) -> list[MemoryRecord]:
+    """Paginated browse over the corpus for the dashboard (A1).
+
+    ``sort`` / ``order`` / ``filter`` are **whitelist-mapped** to fixed SQL
+    fragments (see the module-level maps) — never interpolated — so this path
+    cannot be turned into SQL injection. ``tier`` / ``type`` are bound
+    parameters; ``limit`` / ``offset`` are coerced to safe ints.
+
+    - ``filter='never_retrieved'`` -> ``access_count = 0``
+    - ``filter='unscoped'``        -> ``project_dir IS NULL``
+
+    Archived rows are hidden unless an explicit ``tier`` is requested or
+    ``include_archived`` is set — including under the ``never_retrieved`` /
+    ``unscoped`` presets, so a forgotten (archived) row leaves those views and
+    the chip row set equals the live ``get_stats`` counts they drill into
+    (which also exclude archived). View archived via ``tier='archived'`` or
+    ``include_archived=True``.
+
+    Raises :class:`ListQueryError` on an unknown ``sort``, ``order``, or
+    ``filter``.
+    """
+    sort_col: str | None = _LIST_SORT_COLUMNS.get(sort)
+    if sort_col is None:
+        raise ListQueryError(f"invalid sort column: {sort!r}")
+    order_kw: str | None = _LIST_ORDERS.get(order.lower())
+    if order_kw is None:
+        raise ListQueryError(f"invalid order: {order!r}")
+
+    clauses: list[str] = []
+    params: list[object] = []
+
+    if filter is not None:
+        preset: str | None = _LIST_PRESET_FILTERS.get(filter)
+        if preset is None:
+            raise ListQueryError(f"invalid filter: {filter!r}")
+        clauses.append(preset)
+
+    if tier is not None:
+        clauses.append("tier = ?")
+        params.append(tier)
+
+    if type is not None:
+        clauses.append("type = ?")
+        params.append(type)
+
+    # Hide archived everywhere except an explicit tier request or opt-in, so the
+    # live views (incl. the never_retrieved/unscoped chips) match the live stats.
+    if tier is None and not include_archived:
+        clauses.append("tier != 'archived'")
+
+    where_sql: str = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    safe_limit: int = min(max(1, int(limit)), 1000)
+    safe_offset: int = max(0, int(offset))
+    params.extend([safe_limit, safe_offset])
+
+    # sort_col/order_kw are whitelist constants (never user text); the secondary
+    # `id` sort makes pagination deterministic across tied primary keys.
+    sql: str = (
+        f"SELECT * FROM memories {where_sql} "  # noqa: S608 - whitelisted identifiers only
+        f"ORDER BY {sort_col} {order_kw}, id ASC LIMIT ? OFFSET ?"
+    )
+    rows = conn.execute(sql, params).fetchall()
+    return [_row_to_record(row) for row in rows]
+
+
 # ── Analytics / maintenance ──────────────────────────────────────────────
 
 
@@ -337,12 +444,18 @@ def get_stats(conn: sqlite3.Connection, top_n: int = 15) -> dict:
     Keys: ``by_type``, ``by_tier``, ``total`` (existing) and — added for A2
     observability — ``never_retrieved``, ``unscoped``, ``top_n_share``.
 
-    - ``never_retrieved``: memories with ``access_count = 0`` (dead weight the
-      audit prunes — 29% of the corpus at last measure).
-    - ``unscoped``: memories with ``project_dir IS NULL`` (global rows that leak
-      across every project's recall).
-    - ``top_n_share``: fraction of *all retrievals* (the sum of ``access_count``)
-      concentrated in the ``top_n`` most-retrieved memories — the audit's
+    The three audit signals are computed over the **live** corpus (``tier !=
+    'archived'``) — archived is the pruned state, so counting it as prunable
+    dead weight would mean forgetting a row never moves the number. ``by_type``,
+    ``by_tier`` and ``total`` remain whole-corpus inventory (``by_tier`` reports
+    the archived bucket).
+
+    - ``never_retrieved``: live memories with ``access_count = 0`` (dead weight
+      the audit prunes — 29% of the corpus at last measure).
+    - ``unscoped``: live memories with ``project_dir IS NULL`` (global rows that
+      leak across every project's recall).
+    - ``top_n_share``: fraction of live retrievals (the sum of ``access_count``
+      over live rows) concentrated in the ``top_n`` most-retrieved — the audit's
       concentration signal. ``0.0`` when nothing has been retrieved yet
       (guards against divide-by-zero on a cold corpus).
 
@@ -350,8 +463,8 @@ def get_stats(conn: sqlite3.Connection, top_n: int = 15) -> dict:
     ----------
     top_n:
         Size of the retrieval-concentration head (default 15 — the audit's
-        headline cohort). Denominator is always the *total* retrieval count,
-        never the memory count.
+        headline cohort). Denominator is always the *total* live retrieval
+        count, never the memory count.
     """
     type_rows = conn.execute(
         "SELECT type, COUNT(*) AS cnt FROM memories GROUP BY type"
@@ -362,14 +475,17 @@ def get_stats(conn: sqlite3.Connection, top_n: int = 15) -> dict:
     total_row = conn.execute("SELECT COUNT(*) AS cnt FROM memories").fetchone()
 
     never_retrieved_row = conn.execute(
-        "SELECT COUNT(*) AS cnt FROM memories WHERE access_count = 0"
+        "SELECT COUNT(*) AS cnt FROM memories "
+        "WHERE access_count = 0 AND tier != 'archived'"
     ).fetchone()
     unscoped_row = conn.execute(
-        "SELECT COUNT(*) AS cnt FROM memories WHERE project_dir IS NULL"
+        "SELECT COUNT(*) AS cnt FROM memories "
+        "WHERE project_dir IS NULL AND tier != 'archived'"
     ).fetchone()
 
     total_accesses_row = conn.execute(
-        "SELECT COALESCE(SUM(access_count), 0) AS s FROM memories"
+        "SELECT COALESCE(SUM(access_count), 0) AS s FROM memories "
+        "WHERE tier != 'archived'"
     ).fetchone()
     total_accesses: int = total_accesses_row["s"] if total_accesses_row else 0
 
@@ -377,6 +493,7 @@ def get_stats(conn: sqlite3.Connection, top_n: int = 15) -> dict:
         """\
         SELECT COALESCE(SUM(access_count), 0) AS s FROM (
             SELECT access_count FROM memories
+            WHERE tier != 'archived'
             ORDER BY access_count DESC
             LIMIT ?
         )

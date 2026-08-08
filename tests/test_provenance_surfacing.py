@@ -186,16 +186,18 @@ class TestGetStatsAggregates:
         self, db_conn: sqlite3.Connection, sample_memories: list[MemoryRecord]
     ) -> None:
         stats = get_stats(db_conn)
-        # mem-008 and mem-009 have access_count == 0.
-        assert stats["never_retrieved"] == 2
-        # Only mem-010 carries a project_dir; the other 9 are unscoped.
-        assert stats["unscoped"] == 9
+        # access_count == 0: mem-008 (live) + mem-009 (archived -> excluded).
+        assert stats["never_retrieved"] == 1
+        # project_dir NULL and live: mem-001..008 (mem-009 archived; mem-010 scoped).
+        assert stats["unscoped"] == 8
 
     def test_never_retrieved_matches_ground_truth_sql(
         self, db_conn: sqlite3.Connection, sample_memories: list[MemoryRecord]
     ) -> None:
+        # Ground truth is the LIVE count — get_stats excludes archived.
         ground_truth = db_conn.execute(
-            "SELECT COUNT(*) AS c FROM memories WHERE access_count = 0"
+            "SELECT COUNT(*) AS c FROM memories "
+            "WHERE access_count = 0 AND tier != 'archived'"
         ).fetchone()["c"]
         assert get_stats(db_conn)["never_retrieved"] == ground_truth
 
@@ -245,8 +247,8 @@ class TestStatsResponseModel:
         self, db_conn: sqlite3.Connection, sample_memories: list[MemoryRecord]
     ) -> None:
         resp = StatsResponse(**get_stats(db_conn))
-        assert resp.never_retrieved == 2
-        assert resp.unscoped == 9
+        assert resp.never_retrieved == 1  # live only (archived excluded)
+        assert resp.unscoped == 8
         assert 0.0 <= resp.top_n_share <= 1.0
 
 

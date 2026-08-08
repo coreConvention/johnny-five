@@ -17,6 +17,7 @@ from claude_memory.db.queries import (
     delete_memory,
     get_memory,
     get_stats,
+    list_memories,
     update_memory,
 )
 from claude_memory.embeddings.encoder import EmbeddingEncoder, get_encoder
@@ -119,6 +120,34 @@ def _search_result_to_summary_dict(result: SearchResult) -> dict:
         "updated_at": result.memory.updated_at,
         "last_accessed": result.memory.last_accessed,
         "access_count": result.memory.access_count,
+    }
+
+
+def _record_to_list_dict(record: MemoryRecord) -> dict:
+    """Serialize a :class:`MemoryRecord` for the dashboard list view (A1).
+
+    Includes full ``content`` (the browse view caps rows via ``limit``, and
+    seeing the text is the whole point of deciding what to prune). ``tags`` is
+    normalised to a list the same way the search serializers do, defending
+    against the consolidation double-encode (see :func:`_memory_why_dict`).
+    """
+    tags = (
+        record.tags
+        if isinstance(record.tags, list)
+        else json.loads(record.tags or "[]")
+    )
+    return {
+        "id": record.id,
+        "content": record.content,
+        "type": record.type,
+        "tags": tags,
+        "importance": record.importance,
+        "tier": record.tier,
+        "access_count": record.access_count,
+        "last_accessed": record.last_accessed,
+        "created_at": record.created_at,
+        "source_session": record.source_session,
+        "project_dir": record.project_dir,
     }
 
 
@@ -485,6 +514,44 @@ async def tool_memory_why(memory_id: str) -> dict:
         if record is None:
             return {"found": False, "id": memory_id, "error": "Memory not found"}
         return {"found": True, **_memory_why_dict(record)}
+    finally:
+        conn.close()
+
+
+async def tool_memory_list(
+    sort: str = "created_at",
+    order: str = "desc",
+    filter: str | None = None,
+    tier: str | None = None,
+    type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    include_archived: bool = False,
+) -> dict:
+    """Paginated browse of the corpus for the dashboard (A1) — read-only.
+
+    REST-only (``GET /api/v1/memories``); intentionally **not** registered as an
+    MCP tool, so the MCP tool contract is unchanged. ``sort`` / ``order`` /
+    ``filter`` are whitelist-validated in :func:`list_memories`, which raises
+    ``ValueError`` on anything unknown — the route maps that to HTTP 400.
+    """
+    conn, _, _ = _get_deps()
+    try:
+        records: list[MemoryRecord] = list_memories(
+            conn,
+            sort=sort,
+            order=order,
+            filter=filter,
+            tier=tier,
+            type=type,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+        )
+        return {
+            "results": [_record_to_list_dict(r) for r in records],
+            "count": len(records),
+        }
     finally:
         conn.close()
 

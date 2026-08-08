@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -e .
 ENV MEMORY_DB_PATH=/data/memory.db
 ENV MEMORY_MODEL=all-MiniLM-L6-v2
 
-EXPOSE 8787
+EXPOSE 8787 8788
 
 ENTRYPOINT ["python", "-m", "claude_memory.server"]
 CMD ["--transport", "stdio"]
