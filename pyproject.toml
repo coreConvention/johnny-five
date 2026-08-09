@@ -9,7 +9,7 @@ description = "Need more input! Persistent memory system for Claude Code with mu
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",
     "sentence-transformers>=3.0.0",
     "sqlite-vec>=0.1.0",
     "fastapi>=0.115.0",
