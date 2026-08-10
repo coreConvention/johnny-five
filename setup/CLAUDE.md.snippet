@@ -43,13 +43,14 @@ Rule of thumb: if losing this memory would cost the user real time or trust, tag
 
 ### Docker Management
 
-The johnny-five container must be running for memory tools to work. If you get MCP connection errors:
+The canonical `johnny-five` SSE container must be running before the session starts. If memory tools are missing:
 
 ```bash
 # Check status
 docker ps --filter name=johnny-five --format "{{.Names}} {{.Status}}"
 
-# Restart if needed (stdio transport needs -i flag)
-docker stop johnny-five 2>/dev/null; docker rm johnny-five 2>/dev/null
-docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest --transport stdio
+# Inspect before changing lifecycle
+docker logs johnny-five --tail 50
 ```
+
+Restore only the existing Compose service. Never create a second process or container against `/data/memory.db`. Restart the client session after restoration so its MCP inventory reloads.

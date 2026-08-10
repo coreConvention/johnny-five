@@ -195,7 +195,8 @@ docker volume create johnny-five-data
 # 3. Restore the tarball into it
 ./setup/scripts/restore-volume.sh /path/to/j5-volume-20260428.tar.gz
 
-# 4. Verify
+# 4. Start the one canonical SSE service, then verify
+docker compose up -d
 docker exec johnny-five python -c "
 import asyncio
 from claude_memory.mcp.tools import tool_memory_stats
@@ -207,10 +208,10 @@ print(asyncio.run(tool_memory_stats()))
 ### Scenario: you have a JSON export but no tarball
 
 ```bash
-# 1. Build image, create volume, run a fresh container
-#    (or `docker volume create johnny-five-data && docker compose up -d` for the SSE setup)
+# 1. Build image, create volume, run the canonical SSE service
 docker build -t johnny-five:latest .
-docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest
+docker volume create johnny-five-data
+docker compose up -d
 
 # 2. Wait for first start (model download if not pre-cached)
 sleep 30
@@ -219,7 +220,8 @@ sleep 30
 python setup/scripts/memory-import.py < j5-export-20260428.json
 
 # 4. Verify
-python setup/scripts/memory-export.py | jq '. | length'
+python setup/scripts/memory-export.py > restored-export.json
+python -c "import json; print(len(json.load(open('restored-export.json', encoding='utf-8'))))"
 # Expect: <count from original export>
 ```
 

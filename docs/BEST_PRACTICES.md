@@ -87,7 +87,7 @@ LangGraph's memory docs recommend the same pattern with `(user_id, agent_id, thr
 
 ### Common scoping mistakes
 
-1. **Hardcoded paths.** `project_dir="/Users/me/work/foo"` breaks when you move the repo, mount it in Docker, or check it out as a worktree. Always use `$CLAUDE_PROJECT_DIR` or current working directory.
+1. **Hardcoded paths.** `project_dir="/Users/me/work/foo"` breaks when you move the repo, mount it in Docker, or check it out as a worktree. Always use hook payload `cwd` or the current working directory.
 2. **No project_dir at all.** Memories without `project_dir` are global — they show up in every project's recall. This is sometimes correct (genuine cross-project user preferences) but usually a bug.
 3. **Worktree path mismatch.** A worktree's path is *not* the parent repo's path. If you stored memories with the parent path and now you're in a worktree, scoping won't match. Fix: pick one canonical path (the parent) and always use it.
 
@@ -141,9 +141,9 @@ This pattern doesn't appear in MemGPT or Generative Agents — it's a J5-specifi
 
 ---
 
-## Hook integration (the Claude Code-specific bit)
+## Hook integration
 
-J5's biggest divergence from the literature: it integrates with Claude Code's hook system. No academic memory system has this surface; this is unique to J5.
+J5's biggest divergence from the literature is its client hook integration. The same seven runtime-neutral handlers are installed through platform-specific manifests for Claude Code and Codex.
 
 | Hook | Event | Purpose |
 |---|---|---|
@@ -154,7 +154,7 @@ J5's biggest divergence from the literature: it integrates with Claude Code's ho
 
 The combined effect: **memory becomes invisible to Claude in the best way.** Claude doesn't need to remember to call `memory_recall` at session start — it just shows up in the system prompt. Claude doesn't need to remember to search on corrections — the hook does it. Claude *does* still need to remember to store, but the prompt-type compaction hook nudges that, and the command-type fallback writes a mechanical floor if Claude misses the cue.
 
-This is the integration that makes J5 feel like part of Claude Code rather than a tool Claude has to consciously invoke.
+This is the integration that makes J5 feel native rather than like a tool the model must consciously invoke.
 
 ---
 
@@ -179,11 +179,11 @@ Anthropic shipped a "memory tool" feature in 2025 ([context-management announcem
 | Retrieval | Filename + heading navigation | Semantic + lexical hybrid search |
 | Scoping | Per-conversation default | Per-project via `project_dir` |
 | Deployment | Client-implemented | Docker container, MCP server |
-| Best for | Light-touch memory in any client | Heavy memory in Claude Code with hook integration |
+| Best for | Light-touch memory in any client | Enforced memory discipline in Claude Code or Codex |
 
 Anthropic's deliberate choice not to use embeddings is informative: filename navigation works fine up to ~100 files. J5 uses semantic search because it's optimized for the case where memories number in the hundreds-to-thousands — at that scale, filenames stop being navigable and you need vectors.
 
-If you have <100 memories and only use one client, the Anthropic memory tool is simpler. If you're at 500+ memories, multi-project, and live in Claude Code, J5 is the right fit.
+If you have <100 memories and only use one client, the Anthropic memory tool is simpler. If you're at 500+ memories, multi-project, and need cross-session hook enforcement, J5 is the right fit.
 
 ---
 

@@ -73,6 +73,26 @@ FORBIDDEN_RUNTIME_TEXT = (
     "NotebookEdit",
 )
 
+DOCUMENTATION_FILES = (
+    ROOT / "README.md",
+    ROOT / "docs" / "INTEGRATION.md",
+    ROOT / "docs" / "AGENT_NOTES.md",
+    ROOT / "docs" / "BACKUP_AND_RESTORE.md",
+    ROOT / "docs" / "BEST_PRACTICES.md",
+    ROOT / "docs" / "CLAUDE_MD_SNIPPETS.md",
+    ROOT / "docs" / "AGENTS_MD_SNIPPETS.md",
+    ROOT / "setup" / "CLAUDE.md.snippet",
+    ROOT / "setup" / "codex" / "AGENTS.md.snippet",
+    ROOT / ".claude" / "commands" / "integrate.md",
+)
+
+FORBIDDEN_DOCUMENTATION_TEXT = (
+    "johnny-five-johnny-five-1",
+    "docker attach",
+    "--transport stdio",
+    "CLAUDE_PROJECT_DIR",
+)
+
 
 def _fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
@@ -176,6 +196,28 @@ def test_codex_config_snippet_preserves_proven_transport() -> None:
     assert "http://127.0.0.1:8787/sse/" in snippet
     assert "enabled = true" in snippet
     assert "required = true" in snippet
+
+
+@pytest.mark.parametrize("document", DOCUMENTATION_FILES, ids=lambda path: path.name)
+def test_integration_documentation_rejects_unsafe_or_stale_guidance(document: Path) -> None:
+    text = document.read_text(encoding="utf-8")
+
+    found = [value for value in FORBIDDEN_DOCUMENTATION_TEXT if value in text]
+    assert found == []
+    for line in text.splitlines():
+        assert not ("Codex" in line and ".mcp.json" in line)
+
+
+@pytest.mark.parametrize("document", DOCUMENTATION_FILES, ids=lambda path: path.name)
+def test_integration_documentation_local_links_resolve(document: Path) -> None:
+    text = document.read_text(encoding="utf-8")
+    links = re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", text)
+
+    for link in links:
+        target = link.split("#", 1)[0].strip().strip("<>")
+        if not target or "://" in target or target.startswith("mailto:"):
+            continue
+        assert (document.parent / target).resolve().exists(), f"broken link in {document}: {link}"
 
 
 def test_stop_hook_emits_valid_block_json(tmp_path: Path) -> None:
