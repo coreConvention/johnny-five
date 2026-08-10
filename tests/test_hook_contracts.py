@@ -28,6 +28,11 @@ HOOK_FILES = (
     "memory-discipline-enforce.js",
 )
 
+RUNTIME_FILES = HOOK_FILES + (
+    "lib/j5-runtime.sh",
+    "lib/j5-runtime.js",
+)
+
 FIXTURE_REQUIRED_FIELDS: dict[str, set[str]] = {
     "codex-session-start.json": {"session_id", "cwd", "hook_event_name", "source"},
     "codex-user-prompt-submit.json": {
@@ -87,8 +92,12 @@ def _run_node_hook(
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
     env["USERPROFILE"] = str(temp_home)
+    node = shutil.which("node")
+    if node is None and os.name == "nt":
+        node = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe")
+    assert node is not None
     return subprocess.run(
-        ["node", str(deployed_hooks / hook_name)],
+        [node, str(deployed_hooks / hook_name)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -120,9 +129,9 @@ def test_stop_fixture_exercises_first_stop_attempt() -> None:
     assert payload["stop_hook_active"] is False
 
 
-@pytest.mark.parametrize("hook_name", HOOK_FILES)
-def test_runtime_hook_source_is_platform_neutral(hook_name: str) -> None:
-    source = (HOOKS_DIR / hook_name).read_text(encoding="utf-8")
+@pytest.mark.parametrize("runtime_file", RUNTIME_FILES)
+def test_runtime_hook_source_is_platform_neutral(runtime_file: str) -> None:
+    source = (HOOKS_DIR / runtime_file).read_text(encoding="utf-8")
 
     found = [value for value in FORBIDDEN_RUNTIME_TEXT if value in source]
     assert found == []

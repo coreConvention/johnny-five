@@ -15,12 +15,23 @@
 #
 # Invariant: stdout MUST be a single valid JSON object. Stderr is free-form.
 
-CWD="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/j5-runtime.sh
+source "$SCRIPT_DIR/lib/j5-runtime.sh"
+j5_load_payload
+parsed="$(j5_payload_fields cwd session_id trigger)"
+IFS=$'\x1f' read -r PAYLOAD_CWD SID TRIGGER <<< "$parsed"
+CWD="$(j5_project_cwd "$PAYLOAD_CWD")"
 export NB_CWD="$CWD"
 
 # Collect cheap git context (runs on host, not in container)
 export NB_BRANCH="$(cd "$CWD" 2>/dev/null && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 export NB_RECENT="$(cd "$CWD" 2>/dev/null && git status --porcelain 2>/dev/null | head -10 | tr '\n' '|' || echo '')"
+
+if ! j5_require_canonical_container; then
+  j5_emit_context "PreCompact" "precompact-enforce: $J5_CONTAINER_DIAGNOSTIC. Compaction proceeds without a memory floor; restore SSE and start a fresh task."
+  exit 0
+fi
 
 # Ask johnny-five: do we already have a recent session-state? If not, write a floor.
 # Python inside the container always emits valid JSON on stdout (try/except-wrapped).

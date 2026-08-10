@@ -16,29 +16,21 @@
 
 set +e  # degrade gracefully; never block the user
 
-PAYLOAD=$(cat)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/j5-runtime.sh
+source "$SCRIPT_DIR/lib/j5-runtime.sh"
+j5_load_payload
 
 # Parse prompt + cwd + session_id. Python is the portable JSON tool here.
-parsed=$(printf '%s' "$PAYLOAD" | python -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    # Unit-separator (\x1f) lets us split safely even if prompt contains tabs/newlines.
-    fields = [
-        (d.get('prompt') or '')[:1000],
-        d.get('cwd') or '',
-        d.get('session_id') or '',
-    ]
-    print('\x1f'.join(fields))
-except Exception:
-    print('')
-" 2>/dev/null)
+parsed="$(j5_payload_fields prompt cwd session_id)"
 
 if [ -z "$parsed" ]; then
     exit 0  # couldn't parse payload
 fi
 
 IFS=$'\x1f' read -r PROMPT CWD SID <<< "$parsed"
+CWD="$(j5_project_cwd "$CWD")"
+PROMPT="$(printf '%s' "$PROMPT" | head -c 1000)"
 
 # Correction-signal regex. Case-insensitive. Cost balance: a false positive is
 # one cheap memory_search; a false negative is the kind of "you already told me
@@ -65,7 +57,7 @@ fi
 # the user corrected it AND no memory_search happened. Best-effort — silent on
 # failure to avoid breaking the user prompt path.
 if [ -n "$SID" ]; then
-    DISCIPLINE_DIR="$HOME/.claude/hooks/state"
+    DISCIPLINE_DIR="$(j5_state_dir)"
     DISCIPLINE_FILE="$DISCIPLINE_DIR/memory-discipline-$SID.json"
     mkdir -p "$DISCIPLINE_DIR" 2>/dev/null
     python -c "
@@ -87,21 +79,15 @@ except Exception:
 " "$DISCIPLINE_FILE" 2>/dev/null
 fi
 
-# Discover a running johnny-five container (compose name first, then bare).
-J5_CONTAINER=""
-RUNNING="$(docker ps --filter "name=johnny-five" --format "{{.Names}}" 2>/dev/null)"
-for candidate in johnny-five-johnny-five-1 johnny-five; do
-    if printf '%s\n' "$RUNNING" | grep -qx "$candidate"; then
-        J5_CONTAINER="$candidate"
-        break
-    fi
-done
-[ -z "$J5_CONTAINER" ] && exit 0  # no container — silent (correction state already recorded above)
+if ! j5_require_canonical_container; then
+    j5_emit_context "UserPromptSubmit" "correction-signal hook: $J5_CONTAINER_DIAGNOSTIC; no automatic search was run. Restore the SSE service, then start a fresh task to reload MCP tools."
+    exit 0
+fi
 
 export NB_CWD="$CWD"
 export NB_QUERY="$(printf '%s' "$PROMPT" | head -c 300)"
 
-output="$(docker exec -i -e NB_CWD -e NB_QUERY "$J5_CONTAINER" python - <<'PYEOF' 2>/dev/null
+output="$(docker exec -i -e NB_CWD -e NB_QUERY johnny-five python - <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
 
 def emit(context_str):

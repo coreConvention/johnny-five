@@ -15,27 +15,22 @@
 #
 # Invariant: stdout MUST be a single valid JSON object. Stderr is free-form.
 
-CWD="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/j5-runtime.sh
+source "$SCRIPT_DIR/lib/j5-runtime.sh"
+
+j5_load_payload
+parsed="$(j5_payload_fields cwd session_id)"
+IFS=$'\x1f' read -r PAYLOAD_CWD SID <<< "$parsed"
+CWD="$(j5_project_cwd "$PAYLOAD_CWD")"
 export NB_CWD="$CWD"
 
-# Discover a running johnny-five container. Prefer the compose-managed name
-# (`johnny-five-johnny-five-1`, the canonical SSE setup from `docker compose up
-# -d`); fall back to a bare `johnny-five` for legacy docker-attach/stdio installs.
-J5_CONTAINER=""
-RUNNING="$(docker ps --filter "name=johnny-five" --format "{{.Names}}" 2>/dev/null)"
-for candidate in johnny-five-johnny-five-1 johnny-five; do
-  if printf '%s\n' "$RUNNING" | grep -qx "$candidate"; then
-    J5_CONTAINER="$candidate"
-    break
-  fi
-done
-
-if [ -z "$J5_CONTAINER" ]; then
-  printf '%s' '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "session-start-recall: no running johnny-five container. Start it from your johnny-five clone with `docker compose up -d` (the canonical SSE setup), then call memory_recall manually."}}'
+if ! j5_require_canonical_container; then
+  j5_emit_context "SessionStart" "session-start-recall: $J5_CONTAINER_DIAGNOSTIC. Restore the canonical SSE service, then start a fresh task to reload MCP tools."
   exit 0
 fi
 
-output="$(docker exec -i -e NB_CWD "$J5_CONTAINER" python <<'PYEOF' 2>/dev/null
+output="$(docker exec -i -e NB_CWD johnny-five python <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
 
 def emit(context_str):
@@ -141,5 +136,5 @@ exit_code=$?
 if [ $exit_code -eq 0 ] && [ -n "$output" ]; then
   printf '%s' "$output"
 else
-  printf '%s' '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "session-start-recall: johnny-five container '"$J5_CONTAINER"' is running but docker exec failed — likely a transient health issue or stale container state. Try `docker compose down && docker compose up -d` from your johnny-five clone, then call memory_recall manually."}}'
+  j5_emit_context "SessionStart" "session-start-recall: docker exec against the canonical johnny-five container failed. Restore the SSE service, then start a fresh task to reload MCP tools."
 fi
