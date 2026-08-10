@@ -168,6 +168,16 @@ def test_codex_manifest_is_command_only_and_uses_supported_matchers() -> None:
                 assert (HOOKS_DIR / match.group(1)).is_file()
 
 
+def test_codex_config_snippet_preserves_proven_transport() -> None:
+    snippet = (CODEX_DIR / "config.toml.snippet").read_text(encoding="utf-8")
+
+    assert "command = 'C:\\Program Files\\nodejs\\node.exe'" in snippet
+    assert "supergateway@3.4.3" in snippet
+    assert "http://127.0.0.1:8787/sse/" in snippet
+    assert "enabled = true" in snippet
+    assert "required = true" in snippet
+
+
 def test_stop_hook_emits_valid_block_json(tmp_path: Path) -> None:
     payload = _fixture("codex-stop.json")
     state_dir = tmp_path / "hooks" / "state"

@@ -1,0 +1,91 @@
+{
+  "_comment": "Johnny-Five Codex hooks. install-codex.py resolves the hook-directory placeholders and merges only handlers marked _johnny_five.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{CODEX_HOOKS_DIR_POSIX}}/session-start-recall.sh",
+            "commandWindows": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\session-start-recall.sh\"",
+            "additionalContextLimit": 12000,
+            "_johnny_five": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{CODEX_HOOKS_DIR_POSIX}}/memory-context-inject.sh",
+            "commandWindows": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\memory-context-inject.sh\"",
+            "additionalContextLimit": 4000,
+            "_johnny_five": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{CODEX_HOOKS_DIR_POSIX}}/tool-failure-tracker.js\"",
+            "commandWindows": "\"C:\\Program Files\\nodejs\\node.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\tool-failure-tracker.js\"",
+            "additionalContextLimit": 3000,
+            "_johnny_five": true
+          },
+          {
+            "type": "command",
+            "command": "node \"{{CODEX_HOOKS_DIR_POSIX}}/memory-discipline-track.js\"",
+            "commandWindows": "\"C:\\Program Files\\nodejs\\node.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\memory-discipline-track.js\"",
+            "_johnny_five": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{CODEX_HOOKS_DIR_POSIX}}/precompact-enforce.sh",
+            "commandWindows": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\precompact-enforce.sh\"",
+            "additionalContextLimit": 3000,
+            "_johnny_five": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{CODEX_HOOKS_DIR_POSIX}}/user-prompt-correction.sh",
+            "commandWindows": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\user-prompt-correction.sh\"",
+            "additionalContextLimit": 5000,
+            "_johnny_five": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{{CODEX_HOOKS_DIR_POSIX}}/memory-discipline-enforce.js\"",
+            "commandWindows": "\"C:\\Program Files\\nodejs\\node.exe\" \"{{CODEX_HOOKS_DIR_WINDOWS}}\\memory-discipline-enforce.js\"",
+            "_johnny_five": true
+          }
+        ]
+      }
+    ]
+  }
+}
