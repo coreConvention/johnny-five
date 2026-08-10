@@ -2,6 +2,8 @@ services:
   johnny-five:
     build: .
     image: johnny-five:latest
+    container_name: johnny-five
+    restart: unless-stopped
     ports:
       - "8787:8787"
     volumes:
