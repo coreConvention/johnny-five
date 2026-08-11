@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -34,6 +33,12 @@ from claude_memory.retrieval.reranker import (
     rerank,
 )
 from claude_memory.retrieval.scorer import ScoredCandidate, ScoringWeights
+from claude_memory.scope import (
+    canonicalize_project_dir,
+    is_read_scope_compatible,
+    is_recall_scope_compatible,
+    project_dir_basename,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,9 +163,8 @@ def _apply_tag_filter(
 # ---------------------------------------------------------------------------
 # Project scope enforcement (issue #9)
 #
-# Memories with an explicit project:<X> tag that doesn't match the caller's
-# project are filtered out, UNLESS the memory also has scope:cross-project.
-# Memories with no project:<X> tag are always kept.
+# An explicit MemoryRecord.project_dir is authoritative. Legacy records without
+# one retain the project-tag behavior introduced for issue #9.
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +179,7 @@ def _derive_project_id(project_dir: str | None) -> str | None:
     """
     if not project_dir:
         return None
-    name = os.path.basename(project_dir.rstrip("/\\"))
+    name = project_dir_basename(project_dir)
     if not name:
         return None
     # Lowercase; replace dots, underscores and spaces with hyphens; strip fringe hyphens.
@@ -189,21 +193,30 @@ def _apply_project_scope_filter(
 ) -> dict[str, MemoryRecord]:
     """Filter out memories that explicitly belong to a different project.
 
-    A memory is removed when ALL of the following hold:
-    - It carries at least one ``project:<X>`` tag.
-    - None of those tags matches ``project:<caller_project_id>``.
-    - It does NOT carry ``scope:cross-project``.
+    A memory with an explicit ``project_dir`` is kept only when it matches the
+    caller's canonical project directory. Tags cannot override that boundary.
 
-    Memories with no ``project:<X>`` tag are always kept.
+    Legacy records without ``project_dir`` retain the original issue #9 tag
+    behavior: no project tag is global, a matching project tag is kept, and
+    ``scope:cross-project`` may override a conflicting project tag.
     When *project_dir* is ``None``, no filtering is applied.
     """
-    project_id = _derive_project_id(project_dir)
-    if not project_id:
+    if canonicalize_project_dir(project_dir) is None:
         return records
 
-    caller_tag = f"project:{project_id}"
+    project_id = _derive_project_id(project_dir)
+    caller_tag = f"project:{project_id}" if project_id else None
     filtered: dict[str, MemoryRecord] = {}
     for mid, record in records.items():
+        if record.project_dir:
+            if is_read_scope_compatible(record.project_dir, project_dir):
+                filtered[mid] = record
+            continue
+
+        if caller_tag is None:
+            filtered[mid] = record  # no tag identity for root scopes; preserve legacy reads
+            continue
+
         tags = set(_parse_tags(record.tags))
         project_tags = {t for t in tags if t.startswith("project:")}
         if not project_tags:
@@ -348,10 +361,11 @@ def search_memories(
         token_budget and top_k limits apply to the already-filtered candidate
         set (resolves issue #10 ordering).
     enforce_project_scope:
-        When ``True`` (default) and *project_dir* is provided, memories bearing
-        a ``project:<other>`` tag that doesn't match the caller's project are
-        excluded unless they carry ``scope:cross-project``.  Set to ``False``
-        for cross-project diagnostic queries.
+        When ``True`` (default) and *project_dir* is provided, memories with a
+        different explicit ``project_dir`` are excluded. For legacy unscoped
+        records, a conflicting ``project:<other>`` tag is excluded unless it
+        carries ``scope:cross-project``. Set to ``False`` for cross-project
+        diagnostic queries.
 
     Returns
     -------
@@ -386,8 +400,7 @@ def search_memories(
         records = _apply_tag_filter(records, tags)
         candidates = [c for c in candidates if c.memory_id in records]
 
-    # 4.6 Project scope enforcement (issue #9) — reject project:<other> memories
-    #     unless they carry scope:cross-project.
+    # 4.6 Project scope enforcement (issues #9 and #21).
     if project_dir and enforce_project_scope:
         records = _apply_project_scope_filter(records, project_dir)
         candidates = [c for c in candidates if c.memory_id in records]
@@ -428,11 +441,9 @@ def recall_session_memories(
     semantically relevant memories.
 
     .. note::
-        Project scope enforcement (``enforce_project_scope``) is not applied
-        during session-start recall.  Always-load memories and semantic recall
-        candidates are returned regardless of ``project:<X>`` tags.  This is
-        an intentional design boundary — session-start recall is optimized for
-        breadth (loading all relevant context) rather than strict isolation.
+        Explicit ``project_dir`` ownership is enforced during session recall.
+        Legacy tag-only memories retain broad recall behavior so existing
+        Claude sessions continue to receive global and cross-project context.
 
     Behaviour
     ---------
@@ -484,7 +495,11 @@ def recall_session_memories(
             conn, query_embedding, top_k=top_k * 3,
         )
         fts_results: list[tuple[str, float]] = search_fts(
-            conn, initial_context, project_dir=project_dir, top_k=top_k * 3,
+            conn,
+            initial_context,
+            project_dir=project_dir,
+            top_k=top_k * 3,
+            recall_scope=True,
         )
 
         semantic_candidates = merge_candidates(vec_results, fts_results, [])
@@ -523,6 +538,20 @@ def recall_session_memories(
     # --- Lookup, score, return ------------------------------------------------
     all_ids: list[str] = [c.memory_id for c in all_candidates]
     records: dict[str, MemoryRecord] = _lookup_records(conn, all_ids)
+
+    # An explicit project_dir is an ownership boundary even for broad session
+    # recall. Do not apply tag filtering here: Claude's legacy tag-only recall
+    # behavior remains intentionally unchanged.
+    records = {
+        memory_id: record
+        for memory_id, record in records.items()
+        if is_recall_scope_compatible(record.project_dir, project_dir)
+    }
+    all_candidates = [
+        candidate
+        for candidate in all_candidates
+        if candidate.memory_id in records
+    ]
 
     # Pass initial_context as the "query" so keyword-overlap can boost
     # memories mentioning the user's stated focus.  When initial_context is

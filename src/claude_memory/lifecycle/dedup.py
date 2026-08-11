@@ -17,6 +17,7 @@ from claude_memory.db.queries import (
     update_memory,
 )
 from claude_memory.embeddings.encoder import EmbeddingEncoder
+from claude_memory.scope import is_exact_scope_match
 
 
 @dataclass
@@ -45,6 +46,39 @@ def _merge_content(existing: str, new: str) -> str:
     return f"{existing}\n\nAlso: {new}"
 
 
+def _find_near_duplicate(
+    conn: sqlite3.Connection,
+    embedding: list[float],
+    project_dir: str | None,
+    dedup_threshold: float,
+) -> MemoryRecord | None:
+    """Find the nearest compatible duplicate without foreign-candidate starvation."""
+    candidate_limit: int = 5
+    while True:
+        candidates: list[tuple[str, float]] = search_vec(
+            conn,
+            embedding,
+            top_k=candidate_limit,
+        )
+
+        for candidate_id, distance in candidates:
+            if distance >= dedup_threshold:
+                return None
+
+            existing: MemoryRecord | None = get_memory(conn, candidate_id)
+            if existing is None:
+                continue
+            if is_exact_scope_match(existing.project_dir, project_dir):
+                return existing
+
+        if len(candidates) < candidate_limit:
+            return None
+
+        # All returned candidates were near-duplicates in incompatible scopes.
+        # Expand until the ordered result set reaches the threshold or is exhausted.
+        candidate_limit *= 2
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -67,8 +101,8 @@ def store_with_dedup(
     Workflow
     -------
     1. Generate an embedding for *content*.
-    2. Search for near-duplicates whose cosine distance is below
-       *dedup_threshold*.
+    2. Search for near-duplicates in the same exact project scope whose cosine
+       distance is below *dedup_threshold*.
     3. **If a duplicate is found** — merge the new content into the
        existing memory, bump importance by 1.0 (capped at 10.0),
        re-embed the merged text, and update the record in-place.
@@ -110,20 +144,14 @@ def store_with_dedup(
     embedding: list[float] = encoder.encode(content)
 
     # -- Step 1: look for near-duplicates via vector search ----------------
-    candidates: list[tuple[str, float]] = search_vec(
-        conn, embedding, top_k=5,
+    existing: MemoryRecord | None = _find_near_duplicate(
+        conn,
+        embedding,
+        project_dir,
+        dedup_threshold,
     )
 
-    for candidate_id, distance in candidates:
-        if distance >= dedup_threshold:
-            # Results are ordered by distance; once we pass the
-            # threshold the rest will be even further away.
-            break
-
-        existing: MemoryRecord | None = get_memory(conn, candidate_id)
-        if existing is None:
-            continue
-
+    if existing is not None:
         # -- Merge into existing record ------------------------------------
         merged_content: str = _merge_content(existing.content, content)
         merged_importance: float = min(existing.importance + 1.0, 10.0)

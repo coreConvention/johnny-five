@@ -308,8 +308,9 @@ async def tool_memory_search(
         Optional list of tags that ALL returned memories must possess. Strict
         AND filter applied before ranking (so token_budget respects it).
     enforce_project_scope:
-        When ``True`` (default) and ``project_dir`` is provided, memories with a
-        ``project:<other>`` tag are excluded unless they carry
+        When ``True`` (default) and ``project_dir`` is provided, memories owned
+        by another explicit ``project_dir`` are excluded. For legacy unscoped
+        records, a ``project:<other>`` tag is excluded unless the record carries
         ``scope:cross-project``.
     """
     conn, encoder, settings = _get_deps()
@@ -354,7 +355,8 @@ async def tool_memory_recall(
     Parameters
     ----------
     project_dir:
-        Optional project directory to scope results.
+        Optional project directory to scope results. Explicit ownership is
+        enforced while legacy tag-only memories retain broad recall behavior.
     initial_context:
         Free-text context for semantic+lexical bootstrapping. An empty
         string skips the optional ranked search but still loads always-load.

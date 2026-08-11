@@ -315,6 +315,22 @@ class TestGetAlwaysLoad:
             assert rec is not None
             assert rec.project_dir is None or rec.project_dir == "/home/user/my-project"
 
+    def test_blank_project_dir_loads_only_global_memories(
+        self,
+        db_conn: sqlite3.Connection,
+        sample_memories: list[MemoryRecord],
+    ) -> None:
+        ids = get_always_load(
+            db_conn,
+            project_dir="   ",
+            importance_threshold=7.0,
+        )
+
+        for memory_id in ids:
+            record = get_memory(db_conn, memory_id)
+            assert record is not None
+            assert record.project_dir is None
+
 
 # ---------------------------------------------------------------------------
 # update_access
