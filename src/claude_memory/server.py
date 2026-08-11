@@ -147,9 +147,10 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "default": True,
                         "description": (
-                            "When True (default) and project_dir is provided, memories with a "
-                            "project:<other> tag are excluded unless they carry scope:cross-project. "
-                            "Set False for cross-project diagnostic queries."
+                            "When True (default) and project_dir is provided, memories owned by "
+                            "another explicit project_dir are excluded. For legacy unscoped "
+                            "records, a project:<other> tag is excluded unless the record carries "
+                            "scope:cross-project. Set False for cross-project diagnostic queries."
                         ),
                     },
                 },
@@ -160,15 +161,18 @@ async def list_tools() -> list[Tool]:
             name="memory_recall",
             description=(
                 "Session-start recall of relevant memories. Loads high-importance "
-                "memories unconditionally, plus semantically relevant ones if "
-                "initial_context is provided."
+                "global and canonically matching project memories, plus semantically "
+                "relevant ones if initial_context is provided."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_dir": {
                         "type": "string",
-                        "description": "Optional project directory to scope results",
+                        "description": (
+                            "Optional authoritative project directory scope. Legacy "
+                            "tag-only memories retain broad recall behavior."
+                        ),
                     },
                     "initial_context": {
                         "type": "string",

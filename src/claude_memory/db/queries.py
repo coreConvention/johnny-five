@@ -8,6 +8,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from claude_memory.scope import is_read_scope_compatible, is_recall_scope_compatible
+
 
 @dataclass
 class MemoryRecord:
@@ -32,6 +34,42 @@ class MemoryRecord:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _register_read_scope_function(conn: sqlite3.Connection) -> None:
+    """Register canonical project-scope matching for scoped SQL queries."""
+    conn.create_function(
+        "j5_read_scope_compatible",
+        2,
+        lambda record_scope, requested_scope: int(
+            is_read_scope_compatible(record_scope, requested_scope)
+        ),
+        deterministic=True,
+    )
+
+
+def _register_recall_scope_function(conn: sqlite3.Connection) -> None:
+    """Register global-or-canonical-project matching for recall queries."""
+    conn.create_function(
+        "j5_recall_scope_compatible",
+        2,
+        lambda record_scope, requested_scope: int(
+            is_recall_scope_compatible(record_scope, requested_scope)
+        ),
+        deterministic=True,
+    )
+
+
+def _register_recall_fts_scope_function(conn: sqlite3.Connection) -> None:
+    """Register the recall predicate under an FTS-specific SQLite name."""
+    conn.create_function(
+        "j5_recall_fts_scope_compatible",
+        2,
+        lambda record_scope, requested_scope: int(
+            is_recall_scope_compatible(record_scope, requested_scope)
+        ),
+        deterministic=True,
+    )
 
 
 def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
@@ -196,26 +234,43 @@ def search_fts(
     query: str,
     project_dir: str | None = None,
     top_k: int = 50,
+    recall_scope: bool = False,
 ) -> list[tuple[str, float]]:
     """Full-text search via FTS5.
 
     Returns a list of ``(memory_id, rank)`` tuples ordered by relevance
     (lower rank = better match in FTS5's BM25 scoring).  When *project_dir*
     is provided, results are filtered to memories scoped to that directory
-    or global (no project_dir).
+    or global (no project_dir). When *recall_scope* is true, the recall-specific
+    global-or-canonical-project predicate is applied before the result limit.
     """
     safe_query: str = _sanitize_fts_query(query)
     if not safe_query:
         return []
 
-    if project_dir is not None:
+    if recall_scope:
+        _register_recall_fts_scope_function(conn)
         rows = conn.execute(
             """\
             SELECT m.id, fts.rank
             FROM memories_fts AS fts
             JOIN memories AS m ON m.rowid = fts.rowid
             WHERE memories_fts MATCH ?
-              AND (m.project_dir IS NULL OR m.project_dir = ?)
+              AND j5_recall_fts_scope_compatible(m.project_dir, ?) = 1
+            ORDER BY fts.rank
+            LIMIT ?
+            """,
+            (safe_query, project_dir, top_k),
+        ).fetchall()
+    elif project_dir is not None:
+        _register_read_scope_function(conn)
+        rows = conn.execute(
+            """\
+            SELECT m.id, fts.rank
+            FROM memories_fts AS fts
+            JOIN memories AS m ON m.rowid = fts.rowid
+            WHERE memories_fts MATCH ?
+              AND j5_read_scope_compatible(m.project_dir, ?) = 1
             ORDER BY fts.rank
             LIMIT ?
             """,
@@ -280,12 +335,13 @@ def get_always_load(
     Selects memories whose importance meets the threshold *and* that either
     have no ``project_dir`` (global) or match the given *project_dir*.
     """
+    _register_recall_scope_function(conn)
     rows = conn.execute(
         """\
         SELECT id FROM memories
         WHERE importance >= ?
           AND tier != 'archived'
-          AND (project_dir IS NULL OR project_dir = ?)
+          AND j5_recall_scope_compatible(project_dir, ?) = 1
         ORDER BY importance DESC
         """,
         (importance_threshold, project_dir),

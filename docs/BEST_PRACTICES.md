@@ -77,7 +77,9 @@ The 0–10 scale comes directly from Generative Agents (Park et al., Stanford, 2
 
 ## Project scoping
 
-Every J5 tool accepts a `project_dir` parameter. Memories scoped to a directory are only returned by searches with the same scope. **This is load-bearing — get it wrong and your context silently pollutes.**
+Every J5 tool accepts a `project_dir` parameter. Memories scoped to a directory are only returned by searches and recalls with the same canonical scope. Windows path spelling is normalized for case and slash style; POSIX paths remain case-sensitive. An explicit conflicting `project_dir` cannot be overridden by `scope:cross-project`. **This is load-bearing — get it wrong and your context silently pollutes.**
+
+Unscoped memories remain globally readable for compatibility. Deduplication is stricter: it merges project-scoped writes only with the same explicit scope, and global writes only with global records.
 
 The MCP spec describes this with the `roots` concept ([modelcontextprotocol.io spec](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)):
 

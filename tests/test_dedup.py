@@ -40,6 +40,8 @@ def _make_and_insert(
     content: str,
     tags: list[str] | None = None,
     importance: float = 5.0,
+    project_dir: str | None = None,
+    metadata: dict | None = None,
 ) -> MemoryRecord:
     """Insert a memory and return the record."""
     now: str = datetime.now(timezone.utc).isoformat()
@@ -55,11 +57,11 @@ def _make_and_insert(
         access_count=0,
         importance=importance,
         tier="hot",
-        project_dir=None,
+        project_dir=project_dir,
         source_session=None,
         supersedes=None,
         consolidated_from=json.dumps([]),
-        metadata=json.dumps({}),
+        metadata=json.dumps(metadata or {}),
     )
     embedding: list[float] = encoder.encode(content)
     insert_memory(conn, record, embedding)
@@ -348,3 +350,249 @@ class TestStoreMergesDuplicate:
 
         assert result.action == "inserted"
         assert result.merged_with is None
+
+
+class TestStoreProjectIsolation:
+    def test_foreign_project_duplicate_is_not_merged(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="foreign-001",
+            content="Canonical connectivity guidance",
+            tags=["scope:cross-project"],
+            importance=8.0,
+            project_dir="Z:\\Personal\\Neighborly",
+            metadata={"owner": "neighborly"},
+        )
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("foreign-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Canonical connectivity guidance restated",
+                type="project",
+                tags=["new-context"],
+                project_dir="Z:\\Personal\\w31rd.com",
+                metadata={"owner": "w31rd"},
+            )
+
+        foreign = get_memory(db_conn, "foreign-001")
+        inserted = get_memory(db_conn, result.memory_id)
+        assert result.action == "inserted"
+        assert foreign is not None
+        assert foreign.content == "Canonical connectivity guidance"
+        assert foreign.importance == pytest.approx(8.0)
+        foreign_tags = (
+            json.loads(foreign.tags)
+            if isinstance(foreign.tags, str)
+            else foreign.tags
+        )
+        foreign_metadata = (
+            json.loads(foreign.metadata)
+            if isinstance(foreign.metadata, str)
+            else foreign.metadata
+        )
+        assert foreign_tags == ["scope:cross-project"]
+        assert foreign_metadata == {"owner": "neighborly"}
+        assert inserted is not None
+        assert inserted.project_dir == "Z:\\Personal\\w31rd.com"
+
+    def test_skips_foreign_candidate_and_merges_later_compatible_candidate(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="foreign-001",
+            content="Foreign duplicate",
+            project_dir="Z:\\Personal\\Neighborly",
+        )
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="same-001",
+            content="Same-project duplicate",
+            project_dir="Z:\\Personal\\w31rd.com",
+        )
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("foreign-001", 0.01), ("same-001", 0.02)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Same-project duplicate restated",
+                type="project",
+                project_dir="Z:\\Personal\\w31rd.com",
+            )
+
+        foreign = get_memory(db_conn, "foreign-001")
+        same = get_memory(db_conn, "same-001")
+        assert result.action == "merged"
+        assert result.memory_id == "same-001"
+        assert foreign is not None
+        assert foreign.content == "Foreign duplicate"
+        assert same is not None
+        assert "restated" in same.content
+
+    def test_equivalent_windows_project_paths_can_merge(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="same-001",
+            content="Same project duplicate",
+            project_dir="z:/personal/W31RD.COM/",
+        )
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("same-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Same project duplicate restated",
+                type="project",
+                project_dir="Z:\\Personal\\w31rd.com",
+            )
+
+        assert result.action == "merged"
+        assert result.memory_id == "same-001"
+
+    @pytest.mark.parametrize(
+        ("existing_project_dir", "requested_project_dir"),
+        [
+            (None, "Z:\\Personal\\w31rd.com"),
+            ("Z:\\Personal\\w31rd.com", None),
+        ],
+    )
+    def test_global_and_project_scopes_do_not_merge(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+        existing_project_dir: str | None,
+        requested_project_dir: str | None,
+    ) -> None:
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="existing-001",
+            content="Boundary-sensitive duplicate",
+            project_dir=existing_project_dir,
+        )
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("existing-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Boundary-sensitive duplicate restated",
+                type="project",
+                project_dir=requested_project_dir,
+            )
+
+        existing = get_memory(db_conn, "existing-001")
+        inserted = get_memory(db_conn, result.memory_id)
+        assert result.action == "inserted"
+        assert existing is not None
+        assert existing.content == "Boundary-sensitive duplicate"
+        assert inserted is not None
+        assert inserted.project_dir == requested_project_dir
+
+    def test_posix_trailing_whitespace_scopes_do_not_merge(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="existing-001",
+            content="Whitespace-sensitive duplicate",
+            project_dir="/projects/example ",
+        )
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("existing-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Whitespace-sensitive duplicate restated",
+                type="project",
+                project_dir="/projects/example",
+            )
+
+        existing = get_memory(db_conn, "existing-001")
+        assert result.action == "inserted"
+        assert existing is not None
+        assert existing.content == "Whitespace-sensitive duplicate"
+
+    def test_expands_past_foreign_candidates_to_find_same_scope_duplicate(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        candidate_ids: list[str] = []
+        for index in range(5):
+            candidate_id = f"foreign-{index}"
+            candidate_ids.append(candidate_id)
+            _make_and_insert(
+                db_conn,
+                mock_encoder,
+                id=candidate_id,
+                content=f"Foreign duplicate {index}",
+                project_dir="Z:\\Personal\\Neighborly",
+            )
+
+        candidate_ids.append("same-001")
+        _make_and_insert(
+            db_conn,
+            mock_encoder,
+            id="same-001",
+            content="Same-scope duplicate",
+            project_dir="Z:\\Personal\\w31rd.com",
+        )
+
+        def fake_search_vec(
+            conn: sqlite3.Connection,
+            embedding: list[float],
+            top_k: int = 5,
+        ) -> list[tuple[str, float]]:
+            return [
+                (candidate_id, 0.01 + index * 0.01)
+                for index, candidate_id in enumerate(candidate_ids[:top_k])
+            ]
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            side_effect=fake_search_vec,
+        ) as search_mock:
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Same-scope duplicate restated",
+                type="project",
+                project_dir="Z:\\Personal\\w31rd.com",
+            )
+
+        assert result.action == "merged"
+        assert result.memory_id == "same-001"
+        assert [call.kwargs["top_k"] for call in search_mock.call_args_list] == [5, 10]
