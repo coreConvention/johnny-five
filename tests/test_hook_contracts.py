@@ -127,6 +127,61 @@ def _run_node_hook(
     )
 
 
+def _git_bash_path(path: Path) -> str:
+    resolved = path.resolve()
+    drive = resolved.drive.rstrip(":").lower()
+    tail = resolved.as_posix()[len(resolved.drive) :].lstrip("/")
+    return f"/{drive}/{tail}"
+
+
+def _run_correction_hook(
+    payload: dict[str, Any],
+    temp_home: Path,
+) -> subprocess.CompletedProcess[str]:
+    deployed_hooks = temp_home / "hooks"
+    deployed_hooks.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HOOKS_DIR / "user-prompt-correction.sh", deployed_hooks)
+    shutil.copytree(HOOKS_DIR / "lib", deployed_hooks / "lib", dirs_exist_ok=True)
+
+    bash = shutil.which("bash")
+    if os.name == "nt":
+        git_bash = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe"
+        )
+        if git_bash.is_file():
+            bash = str(git_bash)
+    assert bash is not None
+
+    hook_path = _git_bash_path(deployed_hooks / "user-prompt-correction.sh")
+    wrapper = r'''
+docker() {
+    if [ "$1" = "ps" ]; then
+        printf 'johnny-five\n'
+        return 0
+    fi
+    if [ "$1" = "exec" ]; then
+        cat >/dev/null
+        printf '%s' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"synthetic correction search"}}'
+        return 0
+    fi
+    return 1
+}
+export -f docker
+"$1"
+'''
+    return subprocess.run(
+        [bash, "-c", wrapper, "j5-test", hook_path],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+
 @pytest.mark.parametrize("fixture_name", FIXTURE_REQUIRED_FIELDS)
 def test_codex_fixture_uses_official_common_fields(fixture_name: str) -> None:
     payload = _fixture(fixture_name)
@@ -244,3 +299,27 @@ def test_stop_hook_active_does_not_create_continuation_loop(tmp_path: Path) -> N
 
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_correction_hook_matches_codex_correction_prompt(tmp_path: Path) -> None:
+    payload = _fixture("codex-user-prompt-submit.json") | {
+        "prompt": "Actually, use the canonical Johnny-Five container."
+    }
+
+    result = _run_correction_hook(payload, tmp_path)
+
+    assert result.returncode == 0
+    output = json.loads(result.stdout)
+    assert output["hookSpecificOutput"] == {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": "synthetic correction search",
+    }
+    state = json.loads(
+        (
+            tmp_path
+            / "hooks"
+            / "state"
+            / "memory-discipline-codex-session-001.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert state["correction_seen"] is True
