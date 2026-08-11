@@ -73,7 +73,7 @@ Use **only** for: core user preferences that define your behavior, critical work
 ### Project scoping (LOAD-BEARING — do not get this wrong)
 
 - Memories are scoped per-project via the `project_dir` parameter.
-- **Never hardcode a project path.** Use `$CLAUDE_PROJECT_DIR` (in shell) or current working directory. Loading the wrong project's memories silently pollutes your context.
+- **Never hardcode a project path.** Use hook payload `cwd` or the current working directory. Loading the wrong project's memories silently pollutes your context.
 - The `SessionStart` hook auto-recalls memories scoped to the current project. You see them as `# Resume Context`. **Don't call `memory_recall` again unless you need a DIFFERENT project's memories** — prefer `memory_search` for targeted queries within the current project.
 
 ### Session continuity (compaction survival)
@@ -88,7 +88,7 @@ Compaction strips prompt-specific instructions. The `precompact-enforce` command
 
 ### Docker management
 
-The johnny-five container must be running before Claude Code starts (MCP connections are established at session init; if Docker isn't up, the connection silently fails and never retries).
+The canonical `johnny-five` SSE container must be running before Claude Code starts (MCP connections are established at session init; if Docker isn't up, the connection silently fails and never retries).
 
 ```bash
 # Check container status
@@ -97,14 +97,11 @@ docker ps --filter name=johnny-five --format "{{.Names}} {{.Status}}"
 # Start a stopped container
 docker start johnny-five
 
-# Recreate from image (preserves data via named volume).
-# Preferred: `docker compose up -d` from the repo (SSE on :8787). The stdio
-# single-process form below is the no-port alternative.
-docker stop johnny-five 2>/dev/null; docker rm johnny-five 2>/dev/null
-docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest --transport stdio
+# Inspect logs before changing lifecycle
+docker logs johnny-five --tail 50
 ```
 
-If MCP tools become unavailable mid-session: restart the Claude Code session after starting Docker. Mid-session reconnection is not retried.
+If the service must be restored, restart only the existing Compose service after verifying container ownership. Never start another process against `/data/memory.db`. Then restart the Claude Code session; mid-session MCP inventory reconnection is not retried.
 
 ### Failure modes (quick reference)
 
@@ -131,7 +128,7 @@ Smaller. Drops into a per-project CLAUDE.md to remind Claude that THIS project i
 
 This project is wired into the johnny-five memory system. The global discipline rules in `~/.claude/CLAUDE.md` apply. Project-specific notes:
 
-- `project_dir` for this project: use `$CLAUDE_PROJECT_DIR` or the current cwd; do not hardcode a path that could break across machines.
+- `project_dir` for this project: use hook payload `cwd` or the current working directory; do not hardcode a path that could break across machines.
 - Lesson tags worth using here: `<fill in: e.g. database, multi-tenant, graphql, deployment>`. Add tags as patterns emerge; don't over-engineer the taxonomy upfront.
 - File-based backup of lessons (optional): `.claude/memory/lessons.md` — append a structured `[Category] Description → Mistake → Correction → Rule` entry whenever you `memory_store` a lesson, so the file is grep-able even when the container is down.
 <!-- END johnny-five-project -->

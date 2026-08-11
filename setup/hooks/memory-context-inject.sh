@@ -20,38 +20,31 @@
 #
 # Design:
 #   - 5-minute per-key cache to avoid re-firing on consecutive edits to the
-#     same file. State at ~/.claude/hooks/state/memory-context-cache-<sessionId>.json.
+#     same file. State lives below the deployed hook directory.
 #   - Top-2 results, total content capped at 400 tokens via token_budget.
 #   - Score gate (>=0.55) so only meaningfully-relevant hits are injected.
 #   - Never blocks. Failures are silent.
 
 set +e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/j5-runtime.sh
+source "$SCRIPT_DIR/lib/j5-runtime.sh"
+
 # ---------------------------------------------------------------------------
 # Read payload
 # ---------------------------------------------------------------------------
-PAYLOAD=$(cat)
-
-parsed=$(printf '%s' "$PAYLOAD" | python -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    tool = d.get('tool_name') or ''
-    inp = d.get('tool_input') or {}
-    file_path = inp.get('file_path') or ''
-    cmd = inp.get('command') or ''
-    cwd = d.get('cwd') or ''
-    sid = d.get('session_id') or 'unknown'
-    print('\x1f'.join([tool, file_path, cmd[:500], cwd, sid]))
-except Exception:
-    print('')
-" 2>/dev/null)
+j5_load_payload
+parsed="$(j5_payload_fields tool_name tool_input.file_path tool_input.command cwd session_id)"
 
 if [ -z "$parsed" ]; then
     exit 0
 fi
 
 IFS=$'\x1f' read -r TOOL FILE_PATH CMD CWD SID <<< "$parsed"
+CWD="$(j5_project_cwd "$CWD")"
+SID="${SID:-unknown}"
+CMD="$(printf '%s' "$CMD" | head -c 500)"
 
 # ---------------------------------------------------------------------------
 # Decide whether to fire — and what to search for.
@@ -61,7 +54,7 @@ QUERY=""
 KEY=""
 
 case "$TOOL" in
-    Edit|Write|MultiEdit|NotebookEdit)
+    Edit|Write)
         # EXAMPLE: fire on source files under common source roots. Replace with
         # the paths in YOUR repo where a forgotten convention actually bites.
         if printf '%s' "$FILE_PATH" | grep -qiE '/(src|lib|libs|app|apps)/.*\.(ts|tsx|js|jsx|py|go|rs|cs|java|rb)$'; then
@@ -69,6 +62,15 @@ case "$TOOL" in
             # name — gives both symbol-name and component-kind context.
             basename=$(basename "$FILE_PATH" | sed 's/\.[^.]*$//')
             parent=$(basename "$(dirname "$FILE_PATH")")
+            QUERY="$basename $parent"
+            KEY="edit:$FILE_PATH"
+        fi
+        ;;
+    apply_patch)
+        if printf '%s' "$CMD" | grep -qiE '(src|lib|libs|app|apps)[/\\].*\.(ts|tsx|js|jsx|py|go|rs|cs|java|rb)'; then
+            FILE_PATH="$(printf '%s' "$CMD" | grep -oiE '(src|lib|libs|app|apps)[/\\][^[:space:]]+\.(ts|tsx|js|jsx|py|go|rs|cs|java|rb)' | head -1)"
+            basename="$(basename "$FILE_PATH" | sed 's/\.[^.]*$//')"
+            parent="$(basename "$(dirname "$FILE_PATH")")"
             QUERY="$basename $parent"
             KEY="edit:$FILE_PATH"
         fi
@@ -94,22 +96,17 @@ if [ -z "$QUERY" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Discover a running johnny-five container (compose name first, then bare).
+# Require the one canonical Johnny-Five container.
 # ---------------------------------------------------------------------------
-J5_CONTAINER=""
-RUNNING="$(docker ps --filter "name=johnny-five" --format "{{.Names}}" 2>/dev/null)"
-for candidate in johnny-five-johnny-five-1 johnny-five; do
-    if printf '%s\n' "$RUNNING" | grep -qx "$candidate"; then
-        J5_CONTAINER="$candidate"
-        break
-    fi
-done
-[ -z "$J5_CONTAINER" ] && exit 0  # no container — silent no-op
+if ! j5_require_canonical_container; then
+    j5_emit_context "PreToolUse" "memory-context-inject: $J5_CONTAINER_DIAGNOSTIC; no automatic search was run. Restore SSE and start a fresh task to reload MCP tools."
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Per-key cache — skip if we already searched this key recently
 # ---------------------------------------------------------------------------
-CACHE_DIR="$HOME/.claude/hooks/state"
+CACHE_DIR="$(j5_state_dir)"
 mkdir -p "$CACHE_DIR" 2>/dev/null
 CACHE_FILE="$CACHE_DIR/memory-context-cache-$SID.json"
 TTL_SEC=300  # 5 minutes — long enough to suppress consecutive edits, short
@@ -165,7 +162,7 @@ export NB_CWD="$CWD"
 export NB_QUERY="$QUERY"
 export NB_KEY="$KEY"
 
-output="$(docker exec -i -e NB_CWD -e NB_QUERY -e NB_KEY "$J5_CONTAINER" python - <<'PYEOF' 2>/dev/null
+output="$(docker exec -i -e NB_CWD -e NB_QUERY -e NB_KEY johnny-five python - <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
 
 def emit(context_str):

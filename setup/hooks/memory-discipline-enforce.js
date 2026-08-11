@@ -6,7 +6,7 @@
 // explicitly justify the turn before ending.
 //
 // Pairs with memory-discipline-track.js (PostToolUse).
-// State file: ~/.claude/hooks/state/memory-discipline-<sessionId>.json
+// State files live below the deployed hook directory.
 //
 // NOTE: this is a COMMAND-type Stop hook. It only reads a local state file and
 // never calls an MCP tool, so it works even though MCP servers are shut down at
@@ -25,34 +25,15 @@
 //
 // Counters reset on every successful (allowed) Stop.
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const {
+  isStopHookReentry,
+  readState,
+  safeReadStdin,
+  statePath,
+  writeState,
+} = require('./lib/j5-runtime');
 
 const HEAVY_EDIT_THRESHOLD = 3;
-
-function safeReadStdin() {
-  try {
-    return JSON.parse(fs.readFileSync(0, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-function statePathFor(sessionId) {
-  const d = path.join(os.homedir(), '.claude', 'hooks', 'state');
-  fs.mkdirSync(d, { recursive: true });
-  return path.join(d, `memory-discipline-${sessionId}.json`);
-}
-
-function readState(p) {
-  if (!fs.existsSync(p)) return { edits: 0, stores: 0 };
-  try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return { edits: 0, stores: 0 }; }
-}
-
-function writeState(p, s) {
-  try { fs.writeFileSync(p, JSON.stringify(s)); } catch {}
-}
 
 function resetCounters(p) {
   writeState(p, { edits: 0, stores: 0, searches: 0, turnStart: Date.now() });
@@ -64,11 +45,11 @@ function main() {
 
   // Only enforce on the FIRST stop attempt of a turn, not on re-entry where
   // the assistant is already responding to our block (avoids loops).
-  if (payload.stop_hook_active === true) { process.exit(0); }
+  if (isStopHookReentry(payload)) { process.exit(0); }
 
   const sessionId = payload.session_id || 'unknown';
-  const sp = statePathFor(sessionId);
-  const state = readState(sp);
+  const sp = statePath('memory-discipline', sessionId);
+  const state = readState(sp, { edits: 0, stores: 0 });
 
   // Honor session-level disable
   if (state.disabled === true) { process.exit(0); }
@@ -103,7 +84,7 @@ function main() {
       `  (b) If this turn really had nothing worth remembering (pure refactor with ` +
       `no surprises, mechanical rename, etc.), bypass the check by writing ` +
       `\`{"stop_overrides": true}\` into ` +
-      `\`~/.claude/hooks/state/memory-discipline-${sessionId}.json\` (merge with ` +
+      `the deployed hook state file for session ${sessionId} (merge with ` +
       `existing state) before re-attempting Stop. Use sparingly — bypass means ` +
       `the lesson capture trail goes silent for this turn.`;
 
@@ -130,7 +111,7 @@ function main() {
       `known" into "I'll fix this and avoid the same trap next time."\n\n` +
       `If this correction genuinely needs no memory context (e.g., a typo fix ` +
       `or a stylistic nit), bypass with \`{"stop_overrides": true}\` in ` +
-      `\`~/.claude/hooks/state/memory-discipline-${sessionId}.json\`.`;
+      `the deployed hook state file for session ${sessionId}.`;
 
     process.stdout.write(JSON.stringify({ decision: 'block', reason }));
     process.exit(0);

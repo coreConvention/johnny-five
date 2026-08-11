@@ -2,7 +2,7 @@
 
 A deeper walkthrough than the README's Quick Start. Covers how to adopt johnny-five progressively — from "works when the model remembers" to "enforced by hooks so it can't forget" — plus tuning, daily operation, and migration.
 
-Audience: engineers running Claude Code locally, on macOS / Linux / Windows (Git Bash), who want Claude to remember things across sessions instead of re-explaining the same context every time.
+Audience: engineers running Claude Code or Codex locally who want project-scoped memory across tasks and sessions.
 
 ---
 
@@ -41,10 +41,25 @@ You do **not** need to do all four at once. Tier 1 is enough to start seeing val
 ## Prerequisites
 
 - Docker (any recent version; Docker Desktop or native).
-- Claude Code installed (`claude` CLI available).
+- Claude Code or Codex installed.
 - Python ≥ 3.8 on PATH (used by a couple of the hook scripts for JSON parsing; if you're on a dev machine it's almost certainly there).
 - Node ≥ 18 on PATH *if* you enable the Tier 3 `tool-failure-tracker.js` hook.
 - Git Bash on Windows (MSYS/MinGW). PowerShell alone won't run the `.sh` hook scripts.
+
+---
+
+## Client integration matrix
+
+| Surface | Claude Code | Codex |
+|---|---|---|
+| Project MCP | `.mcp.json` | `.codex/config.toml` |
+| Global instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
+| Project instructions | `CLAUDE.md` | `AGENTS.md` |
+| Global hooks | `~/.claude/settings.json` | `~/.codex/hooks.json` |
+| Hook scripts | `~/.claude/hooks/` | `~/.codex/hooks/` |
+| Trust review | Claude settings flow | Codex `/hooks` |
+
+Codex runs matching hooks from every active layer concurrently. Install Johnny-Five globally once; do not duplicate its handlers in a project manifest. Codex currently executes command handlers; prompt and agent handlers are parsed but skipped.
 
 ---
 
@@ -52,12 +67,13 @@ You do **not** need to do all four at once. Tier 1 is enough to start seeing val
 
 This is the path the main [README](../README.md) walks through. The short version:
 
-1. **Run the container** once so the named volume `johnny-five-data` exists and the image is cached:
+1. **Start the canonical SSE service**:
    ```bash
    docker build -t johnny-five:latest .
-   docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest
+   docker volume create johnny-five-data
+   docker compose up -d
    ```
-2. **Add MCP config** to your project's `.mcp.json` (see README Quick Start).
+2. **Add client-specific MCP config** using the matrix above. Codex uses the pinned [`../setup/codex/config.toml.snippet`](../setup/codex/config.toml.snippet).
 3. **Copy CLAUDE.md rules**:
    ```bash
    cat setup/CLAUDE.md.snippet >> ~/.claude/CLAUDE.md
@@ -69,7 +85,7 @@ This is the path the main [README](../README.md) walks through. The short versio
 
    # if it exists, merge the `hooks` key manually with jq or a text editor
    ```
-5. **Verify**: `docker ps --filter name=johnny-five` should show `Up …`. Start a Claude Code session and ask it to run `memory_stats`. You should see `{"by_type": {}, "by_tier": {}, "total": 0}`.
+5. **Verify**: `docker ps --filter name=johnny-five` must show the one canonical container. Start a fresh client task/session and run `memory_stats`.
 
 That's it. Memory works. Claude is *told* about it. It'll use memory most of the time and miss sometimes.
 
@@ -88,7 +104,7 @@ Claude Code compacts context when it fills up. Compaction strips prompt-specific
 Two command-type hooks bridge into johnny-five via `docker exec` (no new transport required):
 
 - `precompact-enforce.sh` runs on `PreCompact` after the prompt-type hook. It queries johnny-five for a recent `session-state` memory scoped to the current project. If found (model complied), it emits `{"continue": true}`. If not, it *writes a mechanical floor* itself — branch name, cwd, `git status --porcelain`, session id — with tags `[session-state, precompact, mechanical-floor]`, importance 7. Compaction always proceeds; there is always something to resume from.
-- `session-start-recall.sh` runs on `SessionStart`. It calls `memory_recall` on johnny-five scoped to `$CLAUDE_PROJECT_DIR`, formats the top results as a Markdown `# Resume Context` block, and emits as `hookSpecificOutput.additionalContext`. Claude sees it automatically; no tool call needed.
+- `session-start-recall.sh` runs on `SessionStart`. It calls `memory_recall` scoped to hook payload `cwd` (current cwd fallback), formats the top results as a Markdown `# Resume Context` block, and emits `hookSpecificOutput.additionalContext`.
 
 ### Installation
 
@@ -104,10 +120,10 @@ Two command-type hooks bridge into johnny-five via `docker exec` (no new transpo
    - `PreCompact` is a two-hook chain: existing prompt + new command.
 3. **Verify** by manually firing each hook:
    ```bash
-   CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/session-start-recall.sh | head -c 500
+   printf '{"session_id":"verify","cwd":"%s","hook_event_name":"SessionStart","source":"startup"}' "$(pwd)" | bash ~/.claude/hooks/session-start-recall.sh | head -c 500
    # Expect: JSON with hookSpecificOutput.additionalContext
 
-   CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/precompact-enforce.sh
+   printf '{"session_id":"verify","cwd":"%s","hook_event_name":"PreCompact","trigger":"manual"}' "$(pwd)" | bash ~/.claude/hooks/precompact-enforce.sh
    # Expect: JSON with "continue": true
    ```
 
@@ -119,7 +135,7 @@ Two command-type hooks bridge into johnny-five via `docker exec` (no new transpo
 
 ### Container naming
 
-The scripts auto-discover a running johnny-five container: they prefer the compose-managed name `johnny-five-johnny-five-1` (what `docker compose up -d` creates) and fall back to a bare `johnny-five` (the stdio/docker-attach launcher). If your container uses a different name entirely, add it to the `for candidate in …` discovery loop near the top of each script.
+The scripts require exactly one running container named `johnny-five`. If another Johnny-Five-like container exists, they refuse to attach and never start anything. Restore only the canonical Compose service; after MCP restoration, start a fresh client task/session.
 
 ---
 
@@ -220,7 +236,7 @@ Use bypass sparingly — every bypass is a turn where the lesson-capture trail g
 
 ### Requirements
 
-Node ≥ 18 for the two `.js` hooks (same as the Tier 3 failure-tracker). The PreToolUse script auto-discovers the container the same way `session-start-recall.sh` does (compose name first, then bare `johnny-five`).
+Node ≥ 18 for the `.js` hooks. The PreToolUse script requires the same exact canonical-container identity as `session-start-recall.sh`.
 
 ---
 
@@ -244,14 +260,7 @@ All scoring weights are `MEMORY_*` env vars. The defaults below are sensible for
 | `MEMORY_AUTO_CONSOLIDATE_ENABLED` | `false` | When true, server runs aging + consolidation automatically on an interval | `true` to remove the manual cron. |
 | `MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS` | `168` | Hours between auto-consolidation cycles | `168` = weekly (recommended). Floor enforced at 60 s. |
 
-Override any of them at container run time:
-```bash
-docker run -d --name johnny-five -i \
-  -v johnny-five-data:/data \
-  -e MEMORY_KAPPA=0.40 \
-  -e MEMORY_DEDUP_THRESHOLD=0.10 \
-  johnny-five:latest
-```
+Override them in the canonical Compose service's `environment` block, then apply the change with `docker compose up -d`. Never create a parallel container against `johnny-five-data`.
 
 ### `token_budget` on recall/search
 
@@ -270,20 +279,7 @@ Top-1 is always included even if it alone exceeds the budget (otherwise "did any
 
 Johnny-five's defaults are tuned for months-scale active memory. For multi-year retention, combine four knobs and enable auto-consolidation:
 
-```bash
-docker run -d --name johnny-five -i \
-  -v johnny-five-data:/data \
-  -e MEMORY_RECENCY_DECAY=0.002 \
-  -e MEMORY_DECAY_RATE=0.9995 \
-  -e MEMORY_WARM_DAYS=180 \
-  -e MEMORY_COLD_DAYS=730 \
-  -e MEMORY_COLD_IMPORTANCE_THRESHOLD=1.0 \
-  -e MEMORY_BETA=0.10 \
-  -e MEMORY_KAPPA=0.40 \
-  -e MEMORY_AUTO_CONSOLIDATE_ENABLED=true \
-  -e MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS=168 \
-  johnny-five:latest
-```
+Set the years-scale values in the canonical Compose service's `environment` block and recreate that service in place with `docker compose up -d`.
 
 Why each knob matters for long retention:
 
@@ -428,22 +424,17 @@ Johnny-five is actively developed. When a new release lands:
    ```bash
    cd /path/to/johnny-five && git pull && docker build -t johnny-five:latest .
    ```
-4. **Recreate the container**:
+4. **Recreate the canonical Compose service in place**:
    ```bash
-   docker stop johnny-five && docker rm johnny-five
-   docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:latest
+   docker compose up -d --force-recreate
    ```
-   The named volume `johnny-five-data` persists across `docker rm`, so your DB is untouched.
+   The external named volume `johnny-five-data` remains mounted at `/data`.
 5. **Verify**: run `memory_stats` — the count should match pre-upgrade.
-6. **Rollback if anything broke**:
-   ```bash
-   docker stop johnny-five && docker rm johnny-five
-   docker run -d --name johnny-five -i -v johnny-five-data:/data johnny-five:prev
-   ```
+6. **Rollback if anything broke**: point the Compose service image at `johnny-five:prev`, then run `docker compose up -d --force-recreate`.
 
 ### Moving to a new machine
 
-See README's "Migrate to a new machine" section. The short version: backup DB, ship backup and repo, rebuild image on target, restore backup into the new volume, configure `.mcp.json` and hooks.
+See README's "Migrate to a new machine" section. The short version: backup DB, ship backup and repo, rebuild image on target, restore backup into the new volume, then configure the client-specific MCP file and hooks.
 
 ---
 
@@ -451,7 +442,7 @@ See README's "Migrate to a new machine" section. The short version: backup DB, s
 
 ### "No memories loaded" at SessionStart
 
-Hook output says the container is reachable but `memory_recall` returned empty for your `project_dir`. Most likely you haven't stored anything scoped to this directory yet. Check by running `memory_stats` — if the total is 0, that's expected for a fresh DB; if non-zero, check that you're in the directory you think you are and that your memories were stored with the matching `project_dir` (hardcoded paths are a common bug — use `$CLAUDE_PROJECT_DIR` or the current cwd).
+Hook output says the container is reachable but `memory_recall` returned empty for your `project_dir`. Most likely you haven't stored anything scoped to this directory yet. Check `memory_stats`; if non-zero, verify hook payload `cwd` or the current working directory matches stored `project_dir` values.
 
 ### `precompact-enforce.sh` always writes a mechanical floor
 
@@ -474,7 +465,7 @@ The regex is deliberately conservative — a false positive costs one cheap `mem
 ```
 docker: Error response from daemon: Conflict. The container name "/johnny-five" is already in use
 ```
-Run `docker rm johnny-five` first (the container was stopped but not removed). If even that fails, `docker rm -f johnny-five`.
+Stop and inspect `docker ps -a`, Compose ownership, mounts, and logs. Do not delete or create containers until you have confirmed which existing service owns port 8787 and the `johnny-five-data` mount.
 
 ---
 
@@ -484,13 +475,13 @@ Run `docker rm johnny-five` first (the container was stopped but not removed). I
 Negligible. It runs in-memory against already-retrieved candidates, no new DB queries. Expect <5ms overhead per search for typical memory sizes.
 
 **Can I run multiple projects' memories in one johnny-five instance?**
-Yes. Every store/search/recall accepts `project_dir` as a scope. As long as callers pass the right value (which the hooks enforce via `$CLAUDE_PROJECT_DIR`), memories stay isolated. No need for one container per project.
+Yes. Every store/search/recall accepts `project_dir` as a scope. Hooks derive it from payload `cwd` or current cwd. One canonical container serves every project.
 
-**Does Claude Code auto-restart johnny-five if the container dies?**
-Only if your `.mcp.json` entry uses the `docker start || docker run` pattern (see README Quick Start). Raw `docker attach` won't restart a stopped container.
+**Do clients auto-restart johnny-five if the container dies?**
+No client hook starts or creates the service. Docker Compose owns lifecycle; inspect failures before restarting only the existing canonical service.
 
-**stdio or SSE for the MCP transport?**
-SSE (HTTP on port 8787) is the recommended default — one long-lived server serves all your projects, git worktrees, and Cowork/Desktop sessions concurrently (see the README Quick Start). stdio is the single-process alternative with no open port, good for a quick trial or for embedding johnny-five in another tool. Either way, the hook scripts in this guide use `docker exec` to reach the container directly, so they work regardless of which transport you chose.
+**Which MCP transport should I use?**
+Use SSE on port 8787 for the shared database. An embedded process is safe only with an isolated database path and no connection to `/data/memory.db`.
 
 **My DB is at 5000 memories — is that too many?**
 No. SQLite + the FTS5 + vec indexes handle hundreds of thousands of rows without issue. What can get slow is the model cold-start and per-call overhead from MCP marshaling. If *recall* feels slow, tune `MEMORY_WARM_DAYS` / `MEMORY_COLD_DAYS` down so the tier filters exclude more candidates.

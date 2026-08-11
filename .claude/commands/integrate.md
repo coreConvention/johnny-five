@@ -1,10 +1,10 @@
 ---
-description: Integrate johnny-five into the user's Claude Code setup (global hooks + per-project wiring). Idempotent, state-detecting, with verification.
+description: Integrate johnny-five into Claude Code or Codex with platform-specific manifests and verification.
 ---
 
 # /integrate
 
-Set up johnny-five end-to-end: Docker image + container + global MCP wiring + global hooks + global CLAUDE.md discipline rules + (optionally) per-project `.mcp.json` and CLAUDE.md hint.
+Set up Johnny-Five end-to-end using the one canonical SSE service and the selected client's native configuration.
 
 **Read this entire file before acting.** Don't skip steps. Don't paraphrase the marker-bracketed snippets — copy them verbatim.
 
@@ -21,6 +21,15 @@ Before any action, scan:
 3. [`docs/AGENT_NOTES.md`](../../docs/AGENT_NOTES.md) — failure modes you'll reference if anything breaks.
 
 If a step says "see snippet block 1" — open `CLAUDE_MD_SNIPPETS.md` and use the byte-for-byte content between the BEGIN/END markers.
+
+### Choose the client before continuing
+
+Ask whether the target is Claude Code or Codex.
+
+- **Codex:** run `python setup/scripts/install-codex.py --dry-run`, show the proposed merge, then run `--install` after confirmation and `--verify`. Report [`setup/codex/config.toml.snippet`](../../setup/codex/config.toml.snippet) for project MCP configuration and have the user review `/hooks` trust. Stop after the Codex verification path; do not execute the Claude-specific steps below.
+- **Claude Code:** continue with this runbook and the Claude files named below.
+
+Never register Johnny-Five at both global and project hook layers in Codex. Matching hooks from active layers run concurrently.
 
 ---
 
@@ -64,7 +73,7 @@ cat ~/.claude/mcp.json 2>/dev/null | grep -q "johnny-five" && echo "MCP_OK" || e
 ### 1e. Global hooks present
 
 ```bash
-for h in session-start-recall.sh precompact-enforce.sh user-prompt-correction.sh tool-failure-tracker.js; do
+for h in session-start-recall.sh memory-context-inject.sh user-prompt-correction.sh precompact-enforce.sh tool-failure-tracker.js memory-discipline-track.js memory-discipline-enforce.js; do
   test -f ~/.claude/hooks/$h && echo "HOOK_${h}_OK" || echo "HOOK_${h}_MISSING"
 done
 ```
@@ -134,12 +143,10 @@ Verify: `docker image inspect johnny-five:latest >/dev/null && echo OK`
 
 ### 4b. Create / start the container
 
-If `IMAGE_OK` and container is missing:
+If the canonical service is missing, first confirm `docker ps -a` contains no other Johnny-Five-like container and then use Compose:
 ```bash
-docker run -d --name johnny-five -i \
-  -v johnny-five-data:/data \
-  -e MEMORY_DB_PATH=/data/memory.db \
-  johnny-five:latest --transport stdio
+docker volume create johnny-five-data
+docker compose up -d
 ```
 
 If container exists but stopped:
@@ -153,50 +160,47 @@ Verify: `docker ps --filter name=johnny-five --format "{{.Status}}"` returns a s
 
 ### 4c. Register MCP server in `~/.claude/mcp.json` (if `MCP_MISSING`)
 
-If `~/.claude/mcp.json` doesn't exist, create it with:
+If `~/.claude/mcp.json` doesn't exist, create it with the SSE endpoint:
 
 ```json
 {
   "mcpServers": {
     "johnny-five": {
-      "command": "bash",
-      "args": [
-        "-c",
-        "docker start johnny-five 2>/dev/null || docker run -d --name johnny-five -i -v johnny-five-data:/data -e MEMORY_DB_PATH=/data/memory.db johnny-five:latest >/dev/null; docker attach johnny-five"
-      ]
+      "type": "sse",
+      "url": "http://127.0.0.1:8787/sse/"
     }
   }
 }
 ```
 
-If it exists with other servers, merge the `johnny-five` key into the existing `mcpServers` object. Use `jq` for safe JSON merging:
-
-```bash
-jq '.mcpServers["johnny-five"] = {
-  "command": "bash",
-  "args": ["-c", "docker start johnny-five 2>/dev/null || docker run -d --name johnny-five -i -v johnny-five-data:/data -e MEMORY_DB_PATH=/data/memory.db johnny-five:latest >/dev/null; docker attach johnny-five"]
-}' ~/.claude/mcp.json > ~/.claude/mcp.json.tmp && mv ~/.claude/mcp.json.tmp ~/.claude/mcp.json
-```
-
-Verify: `jq '.mcpServers["johnny-five"]' ~/.claude/mcp.json` returns the entry.
+If it exists with other servers, parse it as JSON, add only the `johnny-five` key, write a timestamped backup, and preserve every unrelated server. Verify the resulting file parses and the URL ends in `/sse/`.
 
 ### 4d. Copy hooks to `~/.claude/hooks/` (skip ones already OK)
 
 ```bash
 mkdir -p ~/.claude/hooks
 cp setup/hooks/session-start-recall.sh ~/.claude/hooks/
+cp setup/hooks/memory-context-inject.sh ~/.claude/hooks/
 cp setup/hooks/precompact-enforce.sh ~/.claude/hooks/
 cp setup/hooks/user-prompt-correction.sh ~/.claude/hooks/
 cp setup/hooks/tool-failure-tracker.js ~/.claude/hooks/
+cp setup/hooks/memory-discipline-track.js ~/.claude/hooks/
+cp setup/hooks/memory-discipline-enforce.js ~/.claude/hooks/
+mkdir -p ~/.claude/hooks/lib
+cp setup/hooks/lib/j5-runtime.sh setup/hooks/lib/j5-runtime.js ~/.claude/hooks/lib/
 chmod +x ~/.claude/hooks/*.sh
 ```
 
 Verify each:
 ```bash
 test -x ~/.claude/hooks/session-start-recall.sh && echo OK
+test -x ~/.claude/hooks/memory-context-inject.sh && echo OK
 test -x ~/.claude/hooks/precompact-enforce.sh && echo OK
 test -x ~/.claude/hooks/user-prompt-correction.sh && echo OK
 test -f ~/.claude/hooks/tool-failure-tracker.js && echo OK
+test -f ~/.claude/hooks/memory-discipline-track.js && echo OK
+test -f ~/.claude/hooks/memory-discipline-enforce.js && echo OK
+test -f ~/.claude/hooks/lib/j5-runtime.js && echo OK
 ```
 
 ### 4e. Register hooks in `~/.claude/settings.json` (if `SETTINGS_MISSING`)
@@ -208,11 +212,7 @@ If `~/.claude/settings.json` doesn't exist:
 cp setup/hooks.json.enforced.snippet ~/.claude/settings.json
 ```
 
-If it exists, merge the `hooks` key. Use `jq` to deep-merge:
-
-```bash
-jq -s '.[0] * .[1]' ~/.claude/settings.json setup/hooks.json.enforced.snippet > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
-```
+If it exists, parse both JSON files and merge individual Johnny-Five handler entries without replacing unrelated event arrays. Back up the original first.
 
 **Caution**: if the user has existing `PostToolUse` or `UserPromptSubmit` hooks, the deep-merge may overwrite them. Before running the merge, check for collisions:
 ```bash
@@ -266,11 +266,8 @@ If not present, create or merge into `$PROJECT_PATH/.mcp.json`:
 {
   "mcpServers": {
     "johnny-five": {
-      "command": "bash",
-      "args": [
-        "-c",
-        "docker start johnny-five 2>/dev/null || docker run -d --name johnny-five -i -v johnny-five-data:/data -e MEMORY_DB_PATH=/data/memory.db johnny-five:latest >/dev/null; docker attach johnny-five"
-      ]
+      "type": "sse",
+      "url": "http://127.0.0.1:8787/sse/"
     }
   }
 }
@@ -328,12 +325,12 @@ Expected: a dict with `by_type`, `by_tier`, `total`. For a fresh install, `total
 ### 6b. Hooks fire correctly
 
 ```bash
-CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/session-start-recall.sh | head -c 500
+printf '{"session_id":"verify","cwd":"%s","hook_event_name":"SessionStart","source":"startup"}' "$(pwd)" | bash ~/.claude/hooks/session-start-recall.sh | head -c 500
 ```
 Expected: JSON with `hookSpecificOutput.additionalContext`. The `additionalContext` may be empty if the DB is fresh — that's OK; what matters is the JSON structure is valid.
 
 ```bash
-CLAUDE_PROJECT_DIR=$(pwd) bash ~/.claude/hooks/precompact-enforce.sh
+printf '{"session_id":"verify","cwd":"%s","hook_event_name":"PreCompact","trigger":"manual"}' "$(pwd)" | bash ~/.claude/hooks/precompact-enforce.sh
 ```
 Expected: JSON with `"continue": true`.
 
@@ -386,7 +383,7 @@ What was set up:
 - Image: johnny-five:latest <built|already present>
 - Container: johnny-five <created|started|already running>
 - Global MCP config: ~/.claude/mcp.json <created|updated|already present>
-- Global hooks: 4 scripts in ~/.claude/hooks/
+- Global hooks: seven handlers plus shared runtime helpers in ~/.claude/hooks/
 - Global hooks registered in: ~/.claude/settings.json
 - Global CLAUDE.md: appended johnny-five (v1) snippet
 [if project wiring]
@@ -419,8 +416,8 @@ Any failures along the way? See docs/AGENT_NOTES.md for diagnostics.
 - Network timeout pulling base image → user is offline / rate-limited; retry later.
 
 ### Container won't start
-- "container name already in use" → the container exists from a previous install. `docker rm -f johnny-five` then retry.
-- Container starts then immediately exits → check logs `docker logs johnny-five`. The `-i` (interactive) flag is required for stdio transport — make sure the run command includes it.
+- "container name already in use" → stop and inspect existing container ownership, mounts, ports, and logs. Never create a duplicate.
+- Container starts then immediately exits → check `docker logs johnny-five` and the canonical Compose configuration.
 - "no such image" → image build was skipped or failed; rebuild.
 
 ### `memory_stats` fails inside container

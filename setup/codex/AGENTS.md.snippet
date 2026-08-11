@@ -1,0 +1,11 @@
+<!-- BEGIN johnny-five-codex -->
+## Johnny-Five persistent memory
+
+Johnny-Five is the primary persistent memory store. Its global Codex hooks already recall project-scoped context at task start, search on corrections and risky edits, preserve a pre-compaction floor, and enforce memory discipline.
+
+- Scope every manual memory call with the current working directory or the hook payload `cwd`; never hardcode another project's path.
+- Search before investigation, authoring decisions, corrections, and stores. Update an existing memory instead of creating a duplicate.
+- Use the single canonical SSE service at `http://127.0.0.1:8787/sse/` in the container named `johnny-five`.
+- Never launch a native stdio Johnny-Five process or another container against `/data/memory.db`.
+- If the service is restored after a task starts without J5 tools, start a fresh Codex task to reload the MCP inventory.
+<!-- END johnny-five-codex -->

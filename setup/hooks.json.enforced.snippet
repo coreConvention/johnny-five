@@ -1,5 +1,5 @@
 {
-  "_comment": "Enforced-tier (Tiers 2–4) hook config. See docs/INTEGRATION.md for context. The seven scripts referenced here (session-start-recall.sh, memory-context-inject.sh, precompact-enforce.sh, user-prompt-correction.sh, tool-failure-tracker.js, memory-discipline-track.js, memory-discipline-enforce.js) live in setup/hooks/ — copy them to ~/.claude/hooks/ (and chmod +x) before enabling. The scripts auto-discover the johnny-five container (compose name 'johnny-five-johnny-five-1' first, then bare 'johnny-five'). When merging into an existing settings.json, ADD to each event's hooks array — do not replace arrays that already contain other hooks.",
+  "_comment": "Claude Code enforced-tier hook config. The seven scripts in setup/hooks are runtime-neutral and require the single canonical container named johnny-five. Copy the scripts and setup/hooks/lib to ~/.claude/hooks/ before enabling. When merging into an existing settings.json, add to each event's hooks array rather than replacing unrelated hooks.",
   "hooks": {
     "SessionStart": [
       {
@@ -14,7 +14,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Edit|Write|Bash",
         "hooks": [
           {
             "type": "command",

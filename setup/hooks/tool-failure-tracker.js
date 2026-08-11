@@ -9,26 +9,20 @@
 //     presence, or tool_response.stdout/stderr containing "Error" / "Exception"
 //     for Bash-shaped responses. Conservative — false positives cost a cheap
 //     state-file entry; false negatives just lose the signal.
-//   - Per-session state files live at ~/.claude/hooks/state/tool-failures-<session>.json.
+//   - Per-session state files live below the deployed hook directory.
 //     A best-effort cleanup drops files older than 7 days on each invocation.
 //   - Never blocks the tool. Always emits valid JSON (or empty) on stdout.
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 const crypto = require('crypto');
+const {
+  cleanupOldStateFiles,
+  readState,
+  safeReadStdin,
+  statePath,
+  writeState,
+} = require('./lib/j5-runtime');
 
 const FAILURE_THRESHOLD = 3;
-const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-function safeReadStdin() {
-  try {
-    return JSON.parse(fs.readFileSync(0, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
 function looksLikeFailure(toolResponse) {
   if (toolResponse == null) return false;
   if (toolResponse === false) return true;
@@ -50,30 +44,6 @@ function inputSignature(toolName, toolInput) {
   return `${toolName}:${hash}`;
 }
 
-function stateDir() {
-  const d = path.join(os.homedir(), '.claude', 'hooks', 'state');
-  fs.mkdirSync(d, { recursive: true });
-  return d;
-}
-
-function cleanupOldStateFiles(dir) {
-  try {
-    const now = Date.now();
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.startsWith('tool-failures-')) continue;
-      const p = path.join(dir, f);
-      try {
-        const st = fs.statSync(p);
-        if (now - st.mtimeMs > STATE_TTL_MS) fs.unlinkSync(p);
-      } catch {
-        // best-effort; ignore per-file errors
-      }
-    }
-  } catch {
-    // best-effort; ignore cleanup errors
-  }
-}
-
 function main() {
   const payload = safeReadStdin();
   if (!payload) return; // no-op
@@ -85,23 +55,14 @@ function main() {
   if (!looksLikeFailure(toolResponse)) return;
 
   const sessionId = payload.session_id || 'unknown';
-  const dir = stateDir();
-  cleanupOldStateFiles(dir);
-  const statePath = path.join(dir, `tool-failures-${sessionId}.json`);
-
-  let state = {};
-  if (fs.existsSync(statePath)) {
-    try { state = JSON.parse(fs.readFileSync(statePath, 'utf-8')); } catch { state = {}; }
-  }
+  cleanupOldStateFiles('tool-failures');
+  const stateFile = statePath('tool-failures', sessionId);
+  const state = readState(stateFile);
 
   const sig = inputSignature(toolName, toolInput);
   state[sig] = (state[sig] || 0) + 1;
 
-  try {
-    fs.writeFileSync(statePath, JSON.stringify(state));
-  } catch {
-    // state persistence is best-effort
-  }
+  writeState(stateFile, state);
 
   if (state[sig] < FAILURE_THRESHOLD) return; // not yet triggered
 

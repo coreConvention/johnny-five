@@ -2,13 +2,14 @@
 
 > "Need more input!" — *Short Circuit* (1986)
 
-Persistent memory system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Gives Claude unlimited long-term memory that persists across conversations with semantic search, automatic deduplication, and intelligent aging.
+Persistent memory system for Claude Code and Codex. It gives coding agents long-term memory across conversations with semantic search, automatic deduplication, and intelligent aging.
 
 Built on SQLite + FTS5 + [sqlite-vec](https://github.com/asg017/sqlite-vec) with local embeddings via [sentence-transformers](https://www.sbert.net/).
 
 > **Adopting this in your own environment?**
 >
-> - **The fast path — let Claude do it:** clone this repo, open Claude Code in the clone, and run [`/integrate`](.claude/commands/integrate.md). It detects what's already set up, asks two questions, and wires the rest end to end (Docker container, hooks, global CLAUDE.md discipline rules, optional per-project wiring, verification). Idempotent and re-run-safe.
+> - **Claude Code:** clone this repo, open Claude Code in the clone, and run [`/integrate`](.claude/commands/integrate.md).
+> - **Codex:** clone to the canonical local path, then run `python setup/scripts/install-codex.py --dry-run` followed by `--install`. The installer merges only Johnny-Five-owned handlers and preserves unrelated global hooks.
 > - **Don't have it cloned yet?** Use the [Canned Claude prompt](#canned-claude-prompt) below — paste into a fresh Claude Code session and it'll handle the clone + setup.
 > - **Want to read first or set up by hand?** [`docs/INTEGRATION.md`](docs/INTEGRATION.md) is the three-tier walkthrough; [`docs/BEST_PRACTICES.md`](docs/BEST_PRACTICES.md) covers the discipline rules with citations.
 
@@ -18,6 +19,7 @@ Built on SQLite + FTS5 + [sqlite-vec](https://github.com/asg017/sqlite-vec) with
 |---|---|---|
 | [`docs/INTEGRATION.md`](docs/INTEGRATION.md) | Humans | Three-tier setup walkthrough (architectural reference) |
 | [`docs/CLAUDE_MD_SNIPPETS.md`](docs/CLAUDE_MD_SNIPPETS.md) | `/integrate` + humans | Exact marker-bracketed blocks for global + project CLAUDE.md |
+| [`docs/AGENTS_MD_SNIPPETS.md`](docs/AGENTS_MD_SNIPPETS.md) | Codex + humans | Global and project AGENTS.md guidance |
 | [`docs/BEST_PRACTICES.md`](docs/BEST_PRACTICES.md) | Humans | Discipline rules with research citations (MemGPT, Generative Agents, MCP spec) |
 | [`docs/BACKUP_AND_RESTORE.md`](docs/BACKUP_AND_RESTORE.md) | Operators | Volume snapshot, JSON export/import, scheduled, disaster recovery |
 | [`docs/AGENT_NOTES.md`](docs/AGENT_NOTES.md) | Future Claude sessions | Gotchas, failure modes, what NOT to do (grep-bait) |
@@ -87,7 +89,18 @@ pays the embedding-model cold-start twice. This is the recommended setup.
 > Prefer a single embedded process with no open port (one session at a time)? See
 > [Alternative Transports → stdio](#alternative-transports).
 
-### 3. Add to your project
+### 3. Connect your client
+
+| Surface | Claude Code | Codex |
+|---|---|---|
+| Project MCP | `.mcp.json` | `.codex/config.toml` |
+| Global instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` |
+| Project instructions | `CLAUDE.md` | `AGENTS.md` |
+| Global hooks | `~/.claude/settings.json` | `~/.codex/hooks.json` |
+| Hook scripts | `~/.claude/hooks/` | `~/.codex/hooks/` |
+| Trust review | Claude settings flow | Codex `/hooks` |
+
+For Claude Code, add this to the project MCP configuration:
 
 Add to your project's `.mcp.json` (or your global `~/.claude.json`):
 
@@ -105,7 +118,7 @@ Add to your project's `.mcp.json` (or your global `~/.claude.json`):
 > **Use the trailing slash** (`/sse/`). A bare `/sse` 307-redirects to `/sse/`, and
 > most SSE clients don't follow redirects on streaming GETs.
 
-Then restart Claude Code. The memory tools are available automatically.
+For Codex, copy the exact pinned stanza from [`setup/codex/config.toml.snippet`](setup/codex/config.toml.snippet) into the project's `.codex/config.toml`. It connects through `supergateway@3.4.3` to the same SSE endpoint. Start a fresh task after changing MCP configuration.
 
 ### 4. Disable Claude Code's built-in memory (recommended)
 
@@ -203,7 +216,7 @@ Both are open-source, MIT-licensed, local-first memory systems for LLM agents. T
 
 | | **johnny-five** | **mempalace** |
 |---|---|---|
-| Primary target | Claude Code (MCP stdio) | Claude Code, Codex, general LLM agents |
+| Primary target | Claude Code and Codex through one SSE service | Claude Code, Codex, general LLM agents |
 | MCP tool surface | **8 tools** (store / search / recall / update / forget / aging / consolidate / stats) | 29 tools (palace + drawer + wing + room + hall + kg + diary + tunnel operations) |
 | Store-call semantics | One `memory_store` with `type`, `tags`, `importance`, `metadata` | Separate `add_drawer` / `diary_write` / `kg_add` per content class |
 | Storage format | Digests, typically <500 chars (model-authored) | Verbatim chunks, 800 chars (no paraphrase) |
@@ -252,7 +265,7 @@ Both are open-source, MIT-licensed, local-first memory systems for LLM agents. T
 - **Verbatim text preserved.** No information ever discarded — you can answer any question about *any* past conversation word, not just what a model decided to remember.
 - **Richer architecture surface.** Palace/rooms/wings/tunnels, knowledge graph, diary summaries, agent directories — all addressable as MCP tools.
 - **LLM rerank path.** Pay per query for near-perfect retrieval when you need it.
-- **Framework-agnostic.** Not tied to Claude Code's MCP stdio — works under Codex, Anthropic SDK directly, local/ollama backends.
+- **Framework-agnostic server.** The SSE endpoint works with Claude Code, Codex, Anthropic SDK integrations, and other MCP clients.
 
 **mempalace limitations**
 - **Larger cognitive + token footprint.** 29 tools × schemas in Claude's context is a real cost, especially on smaller models; simple use cases pay for features they don't use.
@@ -304,20 +317,7 @@ Otherwise memories split across two stores.
 
 Johnny-five defaults are tuned for months-scale active memory. For multi-year retention, raise the demotion thresholds, slow the decays, and pin anything you never want to lose:
 
-```bash
-docker run -d --name johnny-five -i \
-  -v johnny-five-data:/data \
-  -e MEMORY_RECENCY_DECAY=0.002 \
-  -e MEMORY_DECAY_RATE=0.9995 \
-  -e MEMORY_WARM_DAYS=180 \
-  -e MEMORY_COLD_DAYS=730 \
-  -e MEMORY_COLD_IMPORTANCE_THRESHOLD=1.0 \
-  -e MEMORY_BETA=0.10 \
-  -e MEMORY_KAPPA=0.40 \
-  -e MEMORY_AUTO_CONSOLIDATE_ENABLED=true \
-  -e MEMORY_AUTO_CONSOLIDATE_INTERVAL_HOURS=168 \
-  johnny-five:latest
-```
+Add the desired `MEMORY_*` values to the `environment` block of the canonical Compose service, then apply them with `docker compose up -d`. Do not create a parallel container against the active volume.
 
 Three complementary mechanisms make long retention work:
 
@@ -348,44 +348,19 @@ The tag is a regular string — no schema changes, no reserved enum. Adding or r
 
 ## Alternative Transports
 
-SSE (see [Quick Start](#quick-start)) is the recommended transport. Two alternatives exist.
+SSE (see [Quick Start](#quick-start)) is the supported shared-database transport.
 
 ### stdio (single embedded process)
 
-Runs one MCP process bound to a single Claude Code session — no open port. Good for a
-quick local trial or for embedding johnny-five inside another tool. Only **one** session
-can attach at a time; for parallel worktrees or Cowork, use SSE.
-
-```bash
-docker run -d --name johnny-five -i \
-  -v johnny-five-data:/data \
-  johnny-five:latest --transport stdio
-```
-
-`.mcp.json` (reuses the container across sessions, avoiding the model cold-start):
-
-```json
-{
-  "mcpServers": {
-    "johnny-five": {
-      "command": "bash",
-      "args": [
-        "-c",
-        "docker start johnny-five 2>/dev/null || docker run -d --name johnny-five -i -v johnny-five-data:/data -e MEMORY_DB_PATH=/data/memory.db johnny-five:latest >/dev/null; docker attach johnny-five"
-      ]
-    }
-  }
-}
-```
+Single-process transport is suitable only for an isolated experiment with its own database path and no running shared SSE service. Never point an embedded process at the active `/data/memory.db`; this repository intentionally omits an active-volume launch recipe.
 
 ### Native Python (no Docker)
 
-The `johnny-five` console script is installed by `pip install -e .`:
+The `johnny-five` console script can serve SSE without Docker when it uses an isolated database:
 
 ```bash
 pip install -e .
-johnny-five --transport sse --port 8787   # SSE/HTTP (recommended)
-johnny-five                               # stdio (single process)
+MEMORY_DB_PATH=/isolated/path/memory.db johnny-five --transport sse --port 8788
 ```
 
 > SSE requires Starlette ≥ 0.46 (declared as a direct dependency; also pulled in by
@@ -425,8 +400,7 @@ configs in **[docs/INTEGRATION.md](docs/INTEGRATION.md)**:
 | **3 — Self-improvement loop** | `UserPromptSubmit` correction-search + `PostToolUse` failure-tracker | You want memory to compound from corrections |
 | **4 — Enforced search-first** | `PreToolUse` pre-search + a command-type `Stop` hook that **blocks** finishing on heavy-edit-without-store or correction-without-search | You want the discipline mandatory, not optional |
 
-The steps below cover Tier 1. Tiers 2–4 layer command-type hook scripts on top — all
-shipped in [`setup/hooks/`](setup/hooks/) and wired by [`/integrate`](.claude/commands/integrate.md).
+The steps below describe Claude Code's Tier 1. Tiers 2–4 share the runtime-neutral scripts in [`setup/hooks/`](setup/hooks/). Claude Code wires them through [`/integrate`](.claude/commands/integrate.md); Codex uses `setup/scripts/install-codex.py` and command handlers only.
 
 ### 1. Add to your CLAUDE.md
 
@@ -467,11 +441,11 @@ cp setup/hooks.json.snippet /path/to/project/.claude/settings.json
 
 ### 3. Add MCP config to your project
 
-Add to `.mcp.json` in your project root (see [Quick Start](#quick-start) above). This is per-project — each project that should use memory needs this entry.
+Use the client-specific project MCP file in the [integration matrix](#3-connect-your-client). Each project that should use memory needs the appropriate entry.
 
 ### 4. Verify it works
 
-Start a Claude Code session in your project and ask:
+Start a fresh Claude Code session or Codex task in your project and ask:
 
 ```
 Use memory_stats to check if johnny-five is connected
@@ -482,13 +456,7 @@ You should see `{"by_type": {}, "by_tier": {}, "total": 0}` for a fresh database
 ## Concurrent Sessions
 
 The recommended SSE setup ([Quick Start](#quick-start)) handles this out of the box:
-one server on port `8787` serves any number of concurrent Claude Code sessions, git
-worktrees, and Cowork/Desktop sessions against the same database. Point every
-project's `.mcp.json` at `http://localhost:8787/sse/` — no per-session configuration.
-
-The legacy stdio / `docker attach` transport ([Alternative Transports](#alternative-transports))
-connects to the container's single main process, so only **one** session can attach at
-a time. If you need parallel sessions, use SSE.
+one server on port `8787` serves concurrent Claude Code sessions, Codex tasks, git worktrees, and desktop sessions against the same database. Point each client-specific project configuration at `http://localhost:8787/sse/` and keep only one canonical container.
 
 ## Backup & Restore
 
@@ -535,7 +503,7 @@ docker start johnny-five
 2. On the new machine: `docker build -t johnny-five:latest .`
 3. `docker volume create johnny-five-data`
 4. Restore the backup into the new volume
-5. Configure `.mcp.json` and hooks
+5. Configure the client-specific MCP file and hooks from the [integration matrix](#3-connect-your-client)
 
 ## Troubleshooting
 
@@ -544,15 +512,15 @@ docker start johnny-five
 - Verify Docker is running: `docker info`
 - Check container status: `docker ps -a --filter name=johnny-five`
 - Check logs: `docker logs johnny-five --tail 20`
-- If the container is stuck: `docker rm -f johnny-five` then restart Claude Code
+- If the container is unhealthy: inspect it and its logs before restarting only the existing canonical Compose service
 
-### Docker not running when Claude Code starts
+### Docker not running when the client starts
 
-MCP connections are established at session init. If Docker isn't running at that point, johnny-five silently fails to connect and never retries. **Start Docker before starting Claude Code.**
+MCP connections are established at task/session init. If Docker is unavailable then, the client may not retry. Restore the canonical service, then start a fresh task/session.
 
 ### SSE: client can't connect / redirect loop / 404 on `/messages/`
 
-- **Use the trailing slash** in your `.mcp.json` URL: `http://localhost:8787/sse/`. A
+- **Use the trailing slash** in the client MCP URL: `http://localhost:8787/sse/`. A
   bare `/sse` 307-redirects to `/sse/`, and most SSE clients don't follow redirects on
   streaming GETs.
 - **`docker compose up -d` → "external volume not found"** — run
@@ -563,17 +531,9 @@ MCP connections are established at session init. If Docker isn't running at that
   Starlette ≥ 0.46. A `POST /messages/?session_id=...`
   returning **400** (not 404) is expected — the route is present.
 
-### Container exits immediately (stdio)
-
-The stdio entrypoint expects stdio input (MCP protocol). The `-i` (interactive) flag is required:
-
-```bash
-docker run -d --name johnny-five -i ...  # -i is mandatory
-```
-
 ### Multiple sessions fail to connect
 
-Only one session can `docker attach` the stdio container at a time. Use [SSE transport](#concurrent-sessions) for concurrent access — it is the recommended default.
+Confirm all clients use the canonical SSE endpoint and `docker ps -a` shows only the container named `johnny-five`. Do not start another process against the shared database.
 
 ### Windows Git Bash: path mangling
 
@@ -583,7 +543,7 @@ Git Bash translates `/data/...` to `C:/Program Files/Git/data/...` in `docker ex
 docker exec johnny-five ls -la //data/memory.db
 ```
 
-The `.mcp.json` config is unaffected because it runs inside the container's shell.
+Client MCP configuration is unaffected because the command runs inside the container's shell.
 
 ## Architecture
 
