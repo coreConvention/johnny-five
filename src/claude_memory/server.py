@@ -2,15 +2,20 @@
 
 Run via::
 
-    python -m claude_memory.server          # stdio transport (default)
-    python -m claude_memory.server --transport sse --port 8787
-    python -m claude_memory.server --transport api --port 8788   # dashboard + REST
+    python -m claude_memory.server                                # stdio (default)
+    python -m claude_memory.server --transport http --port 8787   # /mcp + /sse/
+    python -m claude_memory.server --transport api  --port 8788   # dashboard + REST
 
 The server exposes nine tools for storing, searching, updating, inspecting,
 and managing memories, plus resource endpoints for browsing the database.
 
+The ``http`` transport — spelled ``sse`` by the existing deployment, the two are
+the same server — serves BOTH MCP wire transports from one process against one
+database: Streamable HTTP at ``/mcp`` and the legacy, spec-deprecated HTTP+SSE at
+``/sse/`` + ``/messages/``.
+
 The ``api`` transport serves the read-only dashboard + REST API as a **separate**
-process (``claude_memory.api.app``); it does not touch the MCP stdio/sse path.
+process (``claude_memory.api.app``); it does not touch the MCP stdio/http path.
 """
 
 from __future__ import annotations
@@ -19,10 +24,16 @@ import argparse
 import asyncio
 import json
 import sys
+from typing import TYPE_CHECKING
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+
+if TYPE_CHECKING:
+    # Annotation-only. Starlette is a hard dependency, but the transport
+    # functions import it lazily so the stdio path stays light.
+    from starlette.applications import Starlette
 
 from claude_memory.config import get_settings
 from claude_memory.mcp.tools import (
@@ -437,19 +448,34 @@ async def run_stdio() -> None:
         await _stop_auto_consolidation(bg_task)
 
 
-def run_sse(port: int, host: str = "0.0.0.0") -> None:
-    """Run the MCP server over SSE/HTTP transport.
+def create_http_app() -> Starlette:
+    """Build the ASGI app serving **both** MCP wire transports at once.
 
-    Requires ``uvicorn`` and ``starlette`` to be installed. ``host`` defaults to
-    ``0.0.0.0`` (the container needs this for its published port map); pass
-    ``--host 127.0.0.1`` to keep it host-local.
+    Two endpoints, one process, one database:
+
+    * ``/sse/`` + ``/messages/`` — the legacy HTTP+SSE transport. The MCP spec
+      deprecated it in the 2025-03-26 revision, but it is still what Claude
+      Code's ``{"type": "sse"}`` config, the supergateway bridge Codex uses, and
+      the hook scripts all speak. Unchanged.
+    * ``/mcp`` — Streamable HTTP, the transport that replaced it. Clients that
+      have already dropped SSE (or label it deprecated, as n8n's MCP nodes do)
+      connect here instead.
+
+    The MCP specification explicitly sanctions hosting both simultaneously for
+    backwards compatibility, so no client has to be migrated on our schedule and
+    nothing has to pick a transport at startup.
+
+    Split from :func:`run_http` (mirroring ``api.app.create_app`` /
+    ``api.app.run_api``) so the route table and both transports can be exercised
+    in-process by the test suite without binding a port.
     """
-    from mcp.server.sse import SseServerTransport
-    from starlette.applications import Starlette
-    from starlette.routing import Mount
-    from starlette.types import Receive, Scope, Send
+    from contextlib import asynccontextmanager
 
-    import uvicorn
+    from mcp.server.sse import SseServerTransport
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
     sse = SseServerTransport("/messages/")
 
@@ -478,23 +504,84 @@ def run_sse(port: int, host: str = "0.0.0.0") -> None:
                 app.create_initialization_options(),
             )
 
-    from contextlib import asynccontextmanager
+    # `stateless=True` builds a fresh transport per request and terminates it
+    # once the response is sent. The stateful alternative parks a live task and
+    # transport per session inside the manager, evicted only by an explicit
+    # DELETE, a crash, or a `session_idle_timeout` that defaults to None — so on
+    # a daemon that fields a connection from every Claude Code session, cron
+    # routine, and hook invocation, every client that simply goes away leaks one
+    # of each for the life of the process. Nothing here needs session state:
+    # all nine tools are plain request/response, with no server-initiated
+    # notifications, sampling, or stream resumption. Stateless also passes
+    # `stateless=True` down into `app.run()`, which waives the initialize
+    # handshake, so a client may POST `tools/list` straight away.
+    session_manager = StreamableHTTPSessionManager(app=app, stateless=True)
+
+    # Unlike connect_sse above, the streamable transport never advertises a
+    # second URL back to the client — the session id travels in the
+    # `Mcp-Session-Id` header instead — and it dispatches purely on the HTTP
+    # method. It reads neither `root_path` nor `scope["path"]`, so mounting it
+    # under a prefix is safe and needs no scope rewrite.
+    class StreamableHTTPEndpoint:
+        """Adapts the session manager to a Starlette ``Route`` endpoint.
+
+        ``Route`` inspects its endpoint: plain functions and bound methods are
+        wrapped in ``request_response``, which then awaits the return value as a
+        Response; anything else is used as a raw ASGI app. Passing
+        ``session_manager.handle_request`` directly is the bound-method case and
+        would hit the same ``TypeError: 'NoneType' object is not callable``
+        described for ``handle_sse`` above. An instance of this class selects
+        Starlette's raw-ASGI branch instead.
+        """
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            await session_manager.handle_request(scope, receive, send)
+
+    handle_streamable_http: ASGIApp = StreamableHTTPEndpoint()
 
     @asynccontextmanager
     async def lifespan(_app: Starlette):
-        bg_task = await _start_auto_consolidation_if_enabled()
-        yield
-        await _stop_auto_consolidation(bg_task)
+        # Nest, don't replace. The session manager's task group has to be live
+        # for the whole server lifetime — handle_request raises RuntimeError
+        # without it — and auto-consolidation keeps its existing start/stop
+        # semantics inside that scope.
+        async with session_manager.run():
+            bg_task = await _start_auto_consolidation_if_enabled()
+            try:
+                yield
+            finally:
+                await _stop_auto_consolidation(bg_task)
 
     starlette_app = Starlette(
         routes=[
             Mount("/sse", app=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
+            # Both spellings of the streamable endpoint resolve without a
+            # redirect. Mount("/mcp") compiles to `^/mcp/(?P<path>.*)$`, which
+            # matches "/mcp/" but not a bare "/mcp"; that would fall through to
+            # Starlette's redirect_slashes and 307. `/sse` lives with exactly
+            # that quirk — hence the trailing slash the docs insist on — but
+            # "/mcp" with no slash is the spelling every MCP client and example
+            # uses, so the Route claims the exact path before the Mount.
+            Route("/mcp", endpoint=handle_streamable_http),
+            Mount("/mcp", app=handle_streamable_http),
         ],
         lifespan=lifespan,
     )
 
-    uvicorn.run(starlette_app, host=host, port=port)
+    return starlette_app
+
+
+def run_http(port: int, host: str = "0.0.0.0") -> None:
+    """Serve :func:`create_http_app` with uvicorn.
+
+    Requires ``uvicorn`` and ``starlette`` to be installed. ``host`` defaults to
+    ``0.0.0.0`` (the container needs this for its published port map); pass
+    ``--host 127.0.0.1`` to keep it host-local.
+    """
+    import uvicorn
+
+    uvicorn.run(create_http_app(), host=host, port=port)
 
 
 # ---------------------------------------------------------------------------
@@ -507,25 +594,32 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Claude Memory MCP Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse", "api"],
+        choices=["stdio", "http", "sse", "api"],
         default="stdio",
         help=(
-            "Transport protocol (default: stdio). 'api' serves the read-only "
-            "dashboard + REST API as a SEPARATE service from the MCP server."
+            "Transport protocol (default: stdio). 'http' and 'sse' select the "
+            "SAME server: one process serving Streamable HTTP at /mcp and "
+            "legacy HTTP+SSE at /sse/ + /messages/. 'sse' is retained because "
+            "it is what the deployed compose command passes; prefer 'http' for "
+            "new configuration. 'api' serves the read-only dashboard + REST API "
+            "as a SEPARATE service from the MCP server."
         ),
     )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="Port for sse/api transport (default: 8787 for sse, 8788 for api)",
+        help=(
+            "Port for http/sse/api transport "
+            "(default: 8787 for http/sse, 8788 for api)"
+        ),
     )
     parser.add_argument(
         "--host",
         default=None,
         help=(
-            "Bind host. Applies to both 'sse' and 'api'. Defaults: 0.0.0.0 for "
-            "sse (its container needs this for the port map), 127.0.0.1 for api "
+            "Bind host. Applies to 'http'/'sse' and 'api'. Defaults: 0.0.0.0 for "
+            "http/sse (its container needs this for the port map), 127.0.0.1 for api "
             "(the dashboard exposes mutating endpoints, so it stays host-local). "
             "Pass --host explicitly to override either."
         ),
@@ -534,8 +628,8 @@ def main() -> None:
 
     if args.transport == "stdio":
         asyncio.run(run_stdio())
-    elif args.transport == "sse":
-        run_sse(
+    elif args.transport in ("http", "sse"):
+        run_http(
             args.port if args.port is not None else 8787,
             host=args.host if args.host is not None else "0.0.0.0",
         )

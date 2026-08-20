@@ -481,7 +481,7 @@ Yes. Every store/search/recall accepts `project_dir` as a scope. Hooks derive it
 No client hook starts or creates the service. Docker Compose owns lifecycle; inspect failures before restarting only the existing canonical service.
 
 **Which MCP transport should I use?**
-Use SSE on port 8787 for the shared database. An embedded process is safe only with an isolated database path and no connection to `/data/memory.db`.
+Either HTTP transport on port 8787 — one process serves both against the same shared database, so you are not choosing between them. Prefer **Streamable HTTP** (`http://localhost:8787/mcp`) for anything new; it is the current MCP standard. Use **SSE** (`http://localhost:8787/sse/`, trailing slash required) for clients that don't speak it yet, including Claude Code's `{"type": "sse"}` config and the Codex supergateway bridge — the MCP spec deprecated SSE in its 2025-03-26 revision, but this server keeps serving it. An embedded stdio process is safe only with an isolated database path and no connection to `/data/memory.db`.
 
 **My DB is at 5000 memories — is that too many?**
 No. SQLite + the FTS5 + vec indexes handle hundreds of thousands of rows without issue. What can get slow is the model cold-start and per-call overhead from MCP marshaling. If *recall* feels slow, tune `MEMORY_WARM_DAYS` / `MEMORY_COLD_DAYS` down so the tier filters exclude more candidates.
