@@ -11,6 +11,11 @@ services:
     environment:
       - MEMORY_DB_PATH=/data/memory.db
       - MEMORY_MODEL=all-MiniLM-L6-v2
+    # Serves BOTH MCP wire transports from this single process against one
+    # database: Streamable HTTP at /mcp and legacy HTTP+SSE at /sse/ +
+    # /messages/. "--transport sse" and "--transport http" are aliases for that
+    # same dual-endpoint server; "sse" is kept here so existing tooling and docs
+    # quoting this command keep matching.
     command: ["--transport", "sse", "--port", "8787"]
 
   # Read-only memory dashboard + REST API (Tier A / A1). A SEPARATE service

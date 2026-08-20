@@ -82,7 +82,7 @@ docker volume create johnny-five-data   # one-time: compose declares the volume 
 docker compose up -d                    # serves SSE on http://localhost:8787/sse/
 ```
 
-A single long-lived SSE server on port `8787` serves **all** of your projects, git
+A single long-lived HTTP server on port `8787` serves **all** of your projects, git
 worktrees, and Cowork/Desktop sessions concurrently against one database, and never
 pays the embedding-model cold-start twice. This is the recommended setup.
 
@@ -117,6 +117,13 @@ Add to your project's `.mcp.json` (or your global `~/.claude.json`):
 
 > **Use the trailing slash** (`/sse/`). A bare `/sse` 307-redirects to `/sse/`, and
 > most SSE clients don't follow redirects on streaming GETs.
+
+> **Any other MCP client:** the same server also speaks **Streamable HTTP** at
+> `http://localhost:8787/mcp` — the transport that replaced SSE in the MCP spec's
+> 2025-03-26 revision. Point anything offering a "Streamable HTTP" or "HTTP" option
+> there; n8n's MCP nodes, for instance, already label the SSE choice "Server Sent
+> Events (Deprecated)". No trailing slash needed — `/mcp` and `/mcp/` both resolve.
+> See [Alternative Transports](#alternative-transports).
 
 For Codex, copy the exact pinned stanza from [`setup/codex/config.toml.snippet`](setup/codex/config.toml.snippet) into the project's `.codex/config.toml`. It connects through `supergateway@3.4.3` to the same SSE endpoint. Start a fresh task after changing MCP configuration.
 
@@ -348,7 +355,40 @@ The tag is a regular string — no schema changes, no reserved enum. Adding or r
 
 ## Alternative Transports
 
-SSE (see [Quick Start](#quick-start)) is the supported shared-database transport.
+The service on port `8787` serves **both** MCP wire transports from one process
+against one database. Nothing has to choose at startup, and both can be in use
+simultaneously — the MCP specification explicitly sanctions hosting them together for
+backwards compatibility.
+
+| Endpoint | Transport | Use it when |
+|---|---|---|
+| `http://localhost:8787/mcp` | Streamable HTTP | Default for anything new — the current MCP standard. |
+| `http://localhost:8787/sse/` | HTTP+SSE (deprecated) | Your client predates Streamable HTTP: Claude Code's `{"type": "sse"}` config, the Codex supergateway bridge. |
+
+### Streamable HTTP (`/mcp`)
+
+One endpoint, no separate message URL — the session travels in an `Mcp-Session-Id`
+header instead of a second path. Both `/mcp` and `/mcp/` resolve directly, with no
+redirect to trip over.
+
+This transport runs **stateless**: a fresh transport per request, torn down once the
+response is sent. All nine tools are plain request/response, with no server-initiated
+notifications or streams to resume, so nothing is lost — and a daemon that fields a
+connection from every session, routine, and hook never accumulates per-session state.
+
+```bash
+curl -sX POST http://localhost:8787/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### HTTP+SSE (`/sse/`) — deprecated, still fully supported
+
+Two endpoints: the client opens a stream on `/sse/`, and the server replies with the
+`/messages/` URL to POST to. The MCP spec deprecated this in its 2025-03-26 revision,
+but it is not going anywhere here — every existing configuration keeps working
+unchanged. See [Quick Start](#quick-start) for the client stanzas.
 
 ### stdio (single embedded process)
 
@@ -356,16 +396,18 @@ Single-process transport is suitable only for an isolated experiment with its ow
 
 ### Native Python (no Docker)
 
-The `johnny-five` console script can serve SSE without Docker when it uses an isolated database:
+The `johnny-five` console script can serve both HTTP transports without Docker when it
+uses an isolated database (`--transport sse` is accepted as an alias and behaves
+identically — the deployed Compose command still passes it):
 
 ```bash
 pip install -e .
-MEMORY_DB_PATH=/isolated/path/memory.db johnny-five --transport sse --port 8788
+MEMORY_DB_PATH=/isolated/path/memory.db johnny-five --transport http --port 8788
 ```
 
-> SSE requires Starlette ≥ 0.46 (declared as a direct dependency; also pulled in by
-> FastAPI). The Docker image bundles a compatible version; on a bare `pip install`,
-> don't pin Starlette below 0.46 or the SSE transport will break.
+> The HTTP transports require Starlette ≥ 0.46 (declared as a direct dependency; also
+> pulled in by FastAPI). The Docker image bundles a compatible version; on a bare
+> `pip install`, don't pin Starlette below 0.46 or the SSE transport will break.
 
 ## Development
 
