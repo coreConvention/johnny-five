@@ -167,6 +167,86 @@ set this for you.)
 | `reference` | Pointers to external resources |
 | `lesson` | Mistakes made and rules to prevent them |
 
+## Memory Dashboard
+
+A read-only web view of the corpus, served as a **separate process** from the MCP
+server against the same database. Nothing about the MCP transport changes when it
+runs.
+
+```bash
+docker compose up -d johnny-five-dashboard   # http://127.0.0.1:8788
+# or, without Docker:
+johnny-five --transport api --port 8788
+```
+
+It exposes mutating endpoints (archive, importance edit), so the host port is
+published on `127.0.0.1` only — keep it host-local.
+
+### Views
+
+| View | What it answers |
+| --- | --- |
+| **Browse** | What is in the corpus? Sortable table with tier/type filters and presets for never-retrieved, top-retrieved, and unscoped memories. |
+| **3D graph** | How is the knowledge *shaped*? Every memory as a point placed by meaning. |
+| **Reconcile** | What is near-duplicate or contradictory? Confirm to supersede + archive the older memory. |
+
+### The 3D graph
+
+Memories are positioned by semantic similarity, so **distance on screen means
+distance in meaning** — searching for a topic lights up a tight cluster rather
+than scattered points. Colour is the memory type, size is importance, and fade is
+tier. Click any point for its full text.
+
+Because the corpus has no explicit edges (`supersedes` / `consolidated_from` are
+only written by a confirmed reconciliation, so they are empty until you run one),
+every relationship shown is **derived**. Switch between them with the *links show*
+control:
+
+| Mode | Links memories that … |
+| --- | --- |
+| `semantic` | say similar things — from the embeddings, so it finds relatives sharing no words |
+| `tags` | you labelled alike; tags are IDF-weighted, so a rare tag counts far more than a ubiquitous one |
+| `project` | come from the same project, linked to their closest relatives within it |
+| `time` | were captured in the same burst of work |
+
+Layout is `tsne` (default), `umap`, or `pca`. Measured on a real 2,932-memory
+corpus, as the fraction of each point's 10 nearest neighbours that survive the
+projection to 3D:
+
+| Layout | Neighbours kept | Cold build |
+| --- | --- | --- |
+| `tsne` | **0.42** | ~6 s |
+| `umap` | 0.34 | ~22 s (first run pays a numba JIT) |
+| `pca` | 0.05 | <1 s |
+
+**PCA is offered only as a fast option and is labelled low-quality for a
+reason** — it keeps about 5% of each point's neighbourhood, which still renders
+as a plausible-looking cloud while meaning essentially nothing. Worth knowing:
+UMAP scores *lower* than t-SNE here despite the usual reputation. The metric
+only measures local structure, which is UMAP'''s weaker suit; reach for it when
+you care about how clusters sit relative to one another rather than about who
+each memory'''s immediate neighbours are.
+
+Layouts are computed once over the whole corpus and cached on disk under
+`<db-dir>/_graph_cache/`, keyed by corpus membership. Filtering in the UI only
+changes what is *visible* — it never recomputes positions, so points never move
+between views.
+
+### REST API
+
+Full schema at `/docs`. Beyond the browse/mutate routes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/v1/graph` | Nodes + one mode of derived edges. Params: `projection`, `edges`, `threshold`, `k`. |
+| `GET /api/v1/memories/{id}` | One memory in full. |
+| `GET /api/v1/memories/{id}/why` | Provenance and lineage, without content. |
+| `GET /api/v1/stats` | Aggregate counts by type and tier. |
+
+Both read routes deliberately **do not** bump `access_count`. Retrieval frequency
+is one of the signals that ranks memories, so an inspection surface that counted
+as a retrieval would distort the very ordering it exists to show you.
+
 ## How It Works
 
 ### Multi-Signal Retrieval

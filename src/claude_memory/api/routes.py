@@ -9,12 +9,16 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from claude_memory.api.graph import EDGE_MODES, PROJECTIONS, GraphError, build_graph
+from claude_memory.config import MemorySettings, get_settings
+from claude_memory.db.connection import get_connection
 from claude_memory.db.queries import ListQueryError
 from claude_memory.lifecycle.consolidation import ReconciliationError
 from claude_memory.mcp.tools import (
     tool_memory_aging,
     tool_memory_consolidate,
     tool_memory_forget,
+    tool_memory_get,
     tool_memory_list,
     tool_memory_recall,
     tool_memory_search,
@@ -222,6 +226,19 @@ async def list_memories_endpoint(
     return MemoryListResponse(**result)
 
 
+@router.get("/memories/{memory_id}")
+async def get_one(memory_id: str) -> dict:
+    """Fetch a single memory in full by ID — read-only.
+
+    Does not count as a retrieval: ``access_count`` is left untouched so that
+    inspecting the corpus cannot skew the frequency signal that ranks it.
+    """
+    result: dict = await tool_memory_get(memory_id=memory_id)
+    if not result.get("found", False):
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return result
+
+
 @router.patch("/memories/{memory_id}")
 async def update(memory_id: str, request: UpdateRequest) -> dict:
     """Partially update an existing memory's fields."""
@@ -310,6 +327,57 @@ async def stats() -> StatsResponse:
     """Return aggregate counts grouped by type, tier, and total."""
     result: dict = await tool_memory_stats()
     return StatsResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# 3D graph
+# ---------------------------------------------------------------------------
+
+
+@router.get("/graph")
+def graph(
+    # Whitelist-validated at the boundary as well as in build_graph: the
+    # projection name becomes a path segment in the on-disk layout cache key,
+    # so it must never be free-form user input.
+    projection: str = Query(
+        "tsne",
+        pattern=f"^({'|'.join(PROJECTIONS)})$",
+        description=" | ".join(PROJECTIONS),
+    ),
+    edges: str = Query(
+        "semantic",
+        pattern=f"^({'|'.join(EDGE_MODES)})$",
+        description=" | ".join(EDGE_MODES),
+    ),
+    threshold: float = Query(0.6, ge=-1.0, le=1.0),
+    k: int = Query(8, ge=1, le=32),
+) -> dict:
+    """Return the 3D layout of the whole corpus plus one mode of derived edges.
+
+    Deliberately a **sync** ``def``. FastAPI runs sync handlers in a threadpool,
+    so a cold projection (~5 s for t-SNE, longer for UMAP's first JIT) cannot
+    block the event loop and freeze the rest of the dashboard while it runs.
+
+    Always returns every memory, archived included: positions are computed once
+    over the whole corpus and filtering happens client-side, so that narrowing
+    the view never moves a point. An unknown projection or edge mode is a 400.
+    """
+    settings: MemorySettings = get_settings()
+    db_path = settings.resolve_db_path()
+    conn = get_connection(db_path, settings.embedding_dim)
+    try:
+        return build_graph(
+            conn,
+            db_path,
+            projection=projection,
+            edges=edges,
+            threshold=threshold,
+            k=k,
+        )
+    except GraphError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

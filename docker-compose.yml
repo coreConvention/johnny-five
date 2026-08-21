@@ -26,6 +26,8 @@ services:
   johnny-five-dashboard:
     build: .
     image: johnny-five:latest
+    container_name: johnny-five-dashboard
+    restart: unless-stopped
     ports:
       - "127.0.0.1:8788:8788"
     volumes:

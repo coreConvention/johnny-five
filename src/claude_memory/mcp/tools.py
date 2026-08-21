@@ -636,6 +636,29 @@ async def tool_memory_list(
         conn.close()
 
 
+async def tool_memory_get(memory_id: str) -> dict:
+    """Fetch one memory in full by ID (A1) — read-only.
+
+    REST-only (``GET /api/v1/memories/{id}``), the read counterpart to the
+    existing by-id ``PATCH`` / ``DELETE`` / ``why`` routes. It exists so an
+    inspection surface can show a single record's full text without paging the
+    whole list endpoint to find it.
+
+    Like :func:`tool_memory_why`, this deliberately does **not** bump
+    ``access_count``. Looking at a memory is not the same as retrieving one, and
+    counting it as a retrieval would corrupt the frequency signal that both the
+    retrieval scorer and this very surface depend on.
+    """
+    conn, _, _ = _get_deps()
+    try:
+        record: MemoryRecord | None = get_memory(conn, memory_id)
+        if record is None:
+            return {"found": False, "id": memory_id, "error": "Memory not found"}
+        return {"found": True, **_record_to_list_dict(record)}
+    finally:
+        conn.close()
+
+
 async def tool_memory_aging() -> dict:
     """Run an aging cycle (importance decay + tier updates).
 
