@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +42,11 @@ def create_app() -> FastAPI:
         description="Read-only corpus inspection + hygiene (Tier A / A1).",
         version="0.1.0",
     )
+    # The 3D graph payload is ~1.8 MB of highly repetitive JSON (coordinates,
+    # repeated type/tier strings), which gzip compresses by roughly an order of
+    # magnitude. Cheap here, and it keeps the node payload informative instead
+    # of forcing fields out of it to save bytes.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.include_router(routes.router)
 
     @app.get("/", include_in_schema=False)

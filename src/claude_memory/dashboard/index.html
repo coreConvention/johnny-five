@@ -4,6 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>johnny-five · memory dashboard</title>
+<script type="importmap">
+{ "imports": {
+    "three": "/static/vendor/three.module.min.js",
+    "three/addons/": "/static/vendor/"
+} }
+</script>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5b6570;
@@ -72,6 +78,40 @@
   .side.supersede .role { color: var(--warn); }
   .side .meta { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
   @media (max-width: 640px) { .cand-cols { grid-template-columns: 1fr; } }
+
+  /* ---- 3D graph view ---- */
+  .g-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 0 0 8px; }
+  .g-controls label { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--muted); }
+  .g-range input[type=range] { width: 120px; accent-color: var(--accent); }
+  input[type=search] { font-size: 12.5px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; min-width: 150px; }
+  .g-help { color: var(--muted); font-size: 12.5px; padding: 0 0 10px; max-width: 78ch; }
+  .g-stage { position: relative; height: calc(100vh - 340px); min-height: 320px; max-height: 760px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+  #graphCanvas { position: absolute; inset: 0; }
+  #graphCanvas canvas { display: block; cursor: grab; }
+  #graphCanvas canvas:active { cursor: grabbing; }
+  #graphTooltip {
+    position: fixed; z-index: 40; max-width: 340px; pointer-events: none;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.28);
+  }
+  #graphTooltip .gt-head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+  #graphPanel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: min(420px, 78%);
+    background: var(--panel); border-left: 1px solid var(--line); padding: 14px 16px;
+    overflow-y: auto; z-index: 30; box-shadow: -6px 0 22px rgba(0,0,0,.18);
+  }
+  .gp-close { position: absolute; top: 8px; right: 10px; border: none; background: transparent; color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; }
+  .gp-close:hover { color: var(--ink); }
+  .gp-meta { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 26px 8px 0; }
+  .gp-tags { margin-bottom: 8px; }
+  .gp-content { white-space: pre-wrap; word-break: break-word; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 46vh; overflow-y: auto; margin: 0 0 10px; }
+  .gp-foot { color: var(--muted); font-size: 11.5px; word-break: break-all; }
+  .gp-loading { color: var(--muted); padding: 12px 0; }
+  .g-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 10px 2px 2px; font-size: 12px; color: var(--muted); }
+  .g-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .g-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .g-legend-note { margin-left: auto; font-style: italic; }
+  .g-meta { color: var(--muted); font-size: 12px; padding: 4px 2px 0; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -86,6 +126,7 @@
   <button class="chip" data-preset="never">Never retrieved</button>
   <button class="chip" data-preset="top15">Top 15 retrieved</button>
   <button class="chip" data-preset="unscoped">Unscoped</button>
+  <button class="chip" data-preset="graph">◉ 3D graph</button>
   <button class="chip" data-preset="reconcile">⚖ Reconcile</button>
   <span class="spacer"></span>
   <label>tier
@@ -127,6 +168,51 @@
     <span id="page"></span>
     <button class="act" id="next">Next ›</button>
   </div>
+</div>
+
+<div class="wrap" id="graphWrap" hidden>
+  <div class="g-controls">
+    <label>layout
+      <select id="gProjection">
+        <option value="tsne">t-SNE — recommended</option>
+        <option value="umap">UMAP</option>
+        <option value="pca">PCA — fast, poor separation</option>
+      </select>
+    </label>
+    <label>links show
+      <select id="gEdges">
+        <option value="semantic">Similar meaning</option>
+        <option value="tags">Shared tags</option>
+        <option value="project">Same project</option>
+        <option value="time">Learned together</option>
+        <option value="none">Nothing</option>
+      </select>
+    </label>
+    <label class="g-range">min. strength
+      <input type="range" id="gThreshold" min="0.3" max="0.9" step="0.05" value="0.6" />
+      <span id="gThresholdOut" class="num">0.60</span>
+    </label>
+    <span class="spacer"></span>
+    <input type="search" id="gSearch" placeholder="highlight text or tag…" />
+    <select id="gType">
+      <option value="">any type</option><option>user</option><option>feedback</option>
+      <option>project</option><option>reference</option><option>lesson</option>
+    </select>
+    <select id="gTier">
+      <option value="">any tier</option><option>hot</option><option>warm</option>
+      <option>cold</option><option>archived</option>
+    </select>
+    <select id="gProject"><option value="">any project</option></select>
+    <button class="act" id="gReset">Recentre</button>
+  </div>
+  <div class="g-help" id="graphHelp"></div>
+  <div class="g-stage">
+    <div id="graphCanvas"></div>
+    <aside id="graphPanel" hidden></aside>
+  </div>
+  <div class="g-legend" id="graphLegend"></div>
+  <div class="g-meta" id="graphMeta"></div>
+  <div id="graphTooltip" hidden></div>
 </div>
 
 <div class="wrap" id="reconcileWrap" hidden>
@@ -340,8 +426,18 @@ const PRESETS = {
 function applyPreset(name, btn) {
   document.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c === btn));
   const reconciling = name === "reconcile";
-  document.getElementById("browseWrap").hidden = reconciling;
+  const graphing = name === "graph";
+  document.getElementById("browseWrap").hidden = reconciling || graphing;
   document.getElementById("reconcileWrap").hidden = !reconciling;
+  document.getElementById("graphWrap").hidden = !graphing;
+  // Leaving the graph stops its render loop — an idle WebGL canvas would keep a
+  // GPU busy for a view nobody is looking at.
+  if (!graphing && window.MemoryGraph) window.MemoryGraph.close();
+  if (graphing) {
+    if (window.MemoryGraph) window.MemoryGraph.open(setStatus);
+    else setStatus("3D graph module failed to load.", true);
+    return;
+  }
   if (reconciling) { loadCandidates(); return; }
   Object.assign(state, PRESETS[name], { offset: 0 });
   syncSortHeaders(); reload();
@@ -365,5 +461,6 @@ document.querySelector('.chip[data-preset="all"]').classList.add("active");
 syncSortHeaders();
 reload();
 </script>
+<script type="module" src="/static/graph.js"></script>
 </body>
 </html>
