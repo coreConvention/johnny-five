@@ -534,21 +534,34 @@ function animate() {
 // Data + controls
 // ---------------------------------------------------------------------------
 
+// Monotonic token identifying the newest in-flight request. Responses do not
+// necessarily return in the order they were sent: a cold UMAP build takes ~20 s
+// while a cached t-SNE returns in one, so switching layouts twice in a row can
+// land the FIRST reply last and silently render data the controls no longer
+// describe. Anything but the newest token is discarded.
+let requestToken = 0;
+
 async function load(setStatus) {
+  const token = ++requestToken;
+  const requested = { ...opts };
   const params = new URLSearchParams({
-    projection: opts.projection,
-    edges: opts.edges,
-    threshold: String(opts.threshold),
-    k: String(opts.k),
+    projection: requested.projection,
+    edges: requested.edges,
+    threshold: String(requested.threshold),
+    k: String(requested.k),
   });
-  setStatus(`Building ${opts.projection} layout…`);
+  setStatus(`Building ${requested.projection} layout…`);
   const res = await fetch(`${API}/graph?${params}`);
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try { detail = (await res.json()).detail || detail; } catch (e) { /* keep status */ }
+    if (token !== requestToken) return;  // superseded; its error is stale too
     throw new Error(detail);
   }
-  data = await res.json();
+  const payload = await res.json();
+  if (token !== requestToken) return;  // a newer request is already authoritative
+
+  data = payload;
   visible = new Array(data.nodes.length).fill(true);
   selected = -1;
 

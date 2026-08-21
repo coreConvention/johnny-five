@@ -423,6 +423,22 @@ class TestBuildGraph:
         with pytest.raises(G.GraphError):
             G.build_graph(conn, tmp_path / "memory.db", edges="nonsense")
 
+    def test_projection_is_validated_before_it_reaches_the_cache_path(
+        self, clustered_db, tmp_path
+    ) -> None:
+        """The projection name becomes a path segment in the cache key.
+
+        Validating it only where it is first *used* -- inside _project(), well
+        after the key is built -- would let an arbitrary caller-supplied string
+        reach a filesystem lookup before anything checked it.
+        """
+        conn, _ = clustered_db
+        with pytest.raises(G.GraphError, match="Unknown projection"):
+            G.build_graph(
+                conn, tmp_path / "memory.db", projection="../../../etc/passwd"
+            )
+        assert not (tmp_path / "_graph_cache").exists()
+
     def test_empty_corpus_returns_an_empty_graph(self, db_conn, tmp_path) -> None:
         result = G.build_graph(db_conn, tmp_path / "memory.db")
         assert result["nodes"] == [] and result["edges"] == []

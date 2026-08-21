@@ -564,6 +564,14 @@ def build_graph(
     """
     if edges not in EDGE_MODES:
         raise GraphError(f"Unknown edge mode {edges!r}; expected one of {EDGE_MODES}")
+    # Validate the projection HERE, not where it is first used. It becomes a
+    # path segment in the cache key below, and _project() only rejects an
+    # unknown value further down -- so an unvalidated string would reach the
+    # filesystem lookup before anything checked it.
+    if projection not in PROJECTIONS:
+        raise GraphError(
+            f"Unknown projection {projection!r}; expected one of {PROJECTIONS}"
+        )
 
     started = time.perf_counter()
     records = _load_records(conn)

@@ -336,8 +336,19 @@ async def stats() -> StatsResponse:
 
 @router.get("/graph")
 def graph(
-    projection: str = Query("tsne", description=" | ".join(PROJECTIONS)),
-    edges: str = Query("semantic", description=" | ".join(EDGE_MODES)),
+    # Whitelist-validated at the boundary as well as in build_graph: the
+    # projection name becomes a path segment in the on-disk layout cache key,
+    # so it must never be free-form user input.
+    projection: str = Query(
+        "tsne",
+        pattern=f"^({'|'.join(PROJECTIONS)})$",
+        description=" | ".join(PROJECTIONS),
+    ),
+    edges: str = Query(
+        "semantic",
+        pattern=f"^({'|'.join(EDGE_MODES)})$",
+        description=" | ".join(EDGE_MODES),
+    ),
     threshold: float = Query(0.6, ge=-1.0, le=1.0),
     k: int = Query(8, ge=1, le=32),
 ) -> dict:
