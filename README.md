@@ -155,7 +155,13 @@ set this for you.)
 | `memory_forget` | Archive (soft delete) or permanently delete a memory |
 | `memory_consolidate` | Cluster and summarize cold-tier memories |
 | `memory_stats` | Database statistics by type and tier |
+| `memory_why` | Provenance and lineage of one memory (does not count as a retrieval) |
 | `memory_aging` | Run importance decay and tier re-evaluation cycle |
+
+`memory_search`, `memory_recall`, `memory_stats` and `memory_why` advertise the MCP
+`readOnlyHint` annotation, so clients that gate writes (e.g. Claude Code plan mode)
+run them without a permission prompt. The other tools change the corpus and do not
+carry it. `tests/test_tool_annotations.py` pins this split.
 
 ### Memory Types
 

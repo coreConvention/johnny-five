@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 
 if TYPE_CHECKING:
     # Annotation-only. Starlette is a hard dependency, but the transport
@@ -54,6 +54,12 @@ app = Server("claude-memory")
 # ---------------------------------------------------------------------------
 # Tool listing
 # ---------------------------------------------------------------------------
+
+# Clients gate on this hint: Claude Code's plan mode asks before every call to
+# an MCP tool without it, ahead of any settings allow rule (issue #36).
+# Retrieval bookkeeping (access_count / last_accessed) is not a write for this
+# purpose. Never set it on a tool that changes the corpus.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
 
 @app.list_tools()
@@ -112,6 +118,7 @@ async def list_tools() -> list[Tool]:
                 "Search memories using multi-signal retrieval (semantic similarity, "
                 "recency, frequency, importance). Returns ranked results."
             ),
+            annotations=_READ_ONLY,
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -175,6 +182,7 @@ async def list_tools() -> list[Tool]:
                 "global and canonically matching project memories, plus semantically "
                 "relevant ones if initial_context is provided."
             ),
+            annotations=_READ_ONLY,
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -291,6 +299,7 @@ async def list_tools() -> list[Tool]:
                 "never_retrieved, unscoped, and top_n_share (retrieval "
                 "concentration)."
             ),
+            annotations=_READ_ONLY,
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -305,6 +314,7 @@ async def list_tools() -> list[Tool]:
                 "access_count, and the supersedes/consolidated_from graph. "
                 "Read-only, does not count as a retrieval, and excludes content."
             ),
+            annotations=_READ_ONLY,
             inputSchema={
                 "type": "object",
                 "properties": {
