@@ -1,5 +1,9 @@
 # Re-home worktree-scoped memories (issue #38): execution prompt
 
+> **Executed 2026-09-28, after #39 merged:** 196 moved, 0 skipped, 0 failed,
+> 31 session snapshots left in place, 0 worktree-scoped rows left. #38 is
+> closed. A re-run is safe: the plan comes back empty.
+
 > **Task:** finish the data half of [`coreConvention/johnny-five#38`](https://github.com/coreConvention/johnny-five/issues/38).
 > Hooks older than #38 scoped every git-worktree session to the worktree's own
 > path, so memories stored from worktrees sit under paths no later session asks
