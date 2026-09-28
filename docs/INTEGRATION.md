@@ -103,8 +103,24 @@ Claude Code compacts context when it fills up. Compaction strips prompt-specific
 
 Two command-type hooks bridge into johnny-five via `docker exec` (no new transport required):
 
-- `precompact-enforce.sh` runs on `PreCompact` after the prompt-type hook. It queries johnny-five for a recent `session-state` memory scoped to the current project. If found (model complied), it emits `{"continue": true}`. If not, it *writes a mechanical floor* itself — branch name, cwd, `git status --porcelain`, session id — with tags `[session-state, precompact, mechanical-floor]`, importance 7. Compaction always proceeds; there is always something to resume from.
-- `session-start-recall.sh` runs on `SessionStart`. It calls `memory_recall` scoped to hook payload `cwd` (current cwd fallback), formats the top results as a Markdown `# Resume Context` block, and emits `hookSpecificOutput.additionalContext`.
+- `precompact-enforce.sh` runs on `PreCompact` after the prompt-type hook. It queries johnny-five for a recent `session-state` memory scoped to the current project. If found (model complied), it emits `{"continue": true}`. If not, it *writes a mechanical floor* itself — branch name, cwd, `git status --porcelain`, session id — with tags `[session-state, precompact, mechanical-floor]`, importance 7. The branch, cwd and status come from the session's own checkout, so a floor written in a git worktree names that worktree. Compaction always proceeds; there is always something to resume from.
+- `session-start-recall.sh` runs on `SessionStart`. It calls `memory_recall` scoped to the project directory (see [How hooks choose `project_dir`](#how-hooks-choose-project_dir)), formats the top results as a Markdown `# Resume Context` block, and emits `hookSpecificOutput.additionalContext`.
+
+### How hooks choose `project_dir`
+
+Johnny-Five keeps a project memory only for requests with the same `project_dir`, compared as a path (case and slash style fold on Windows). Every checkout of a repository must therefore send the same directory. All hooks resolve it through `j5_project_cwd` in [`setup/hooks/lib/j5-runtime.sh`](../setup/hooks/lib/j5-runtime.sh), in this order:
+
+1. **`J5_PROJECT_DIR`**, when set, is used as-is. Set it for a separate clone, which git cannot link to the main checkout.
+2. **Inside a git repository, the main checkout**: the parent of `git rev-parse --path-format=absolute --git-common-dir`. A linked worktree, the main checkout and any subdirectory of either all give the same answer.
+3. **Otherwise the session directory**: the hook payload's `cwd`, or the hook's working directory when the payload has none or names a directory that no longer exists.
+
+Manual `memory_*` calls must pass the same value, or they read and write a different scope from the hooks. Inside a git repository:
+
+```bash
+dirname "$(git rev-parse --path-format=absolute --git-common-dir)"
+```
+
+Repositories whose git directory is not a `.git` folder in the main checkout (bare repositories, submodules, `git clone --separate-git-dir`) fall through to step 3, as does git older than 2.31. Set `J5_PROJECT_DIR` for those. Also set it on Windows when a repository is reached through a junction, a `subst` drive or a mapped network drive: git resolves those in a worktree but not in the main checkout, so the two would report different paths.
 
 ### Installation
 
@@ -358,7 +374,7 @@ Rough guide — adjust to taste.
 
 ### What Claude sees at session start
 
-With Tier 2 enabled, the first thing in Claude's context is the `# Resume Context` block from `session-start-recall.sh`. Example (abbreviated):
+With Tier 2 enabled, the first thing in Claude's context is the `# Resume Context` block from `session-start-recall.sh`. In a git worktree the header also names the session's own checkout, because every checkout of the repository shares the recalled memories, including the latest session-state. Example (abbreviated):
 ```markdown
 # Resume Context (auto-recalled by session-start-recall hook)
 
@@ -442,7 +458,7 @@ See README's "Migrate to a new machine" section. The short version: backup DB, s
 
 ### "No memories loaded" at SessionStart
 
-Hook output says the container is reachable but `memory_recall` returned empty for your `project_dir`. Most likely you haven't stored anything scoped to this directory yet. Check `memory_stats`; if non-zero, verify hook payload `cwd` or the current working directory matches stored `project_dir` values.
+Hook output says the container is reachable but `memory_recall` returned empty for your `project_dir`. Most likely you haven't stored anything scoped to this directory yet. Check `memory_stats`; if non-zero, verify that the `project_dir` in the `# Resume Context` header matches stored `project_dir` values (see [How hooks choose `project_dir`](#how-hooks-choose-project_dir)). Hooks older than issue #38 scoped a git worktree session to the worktree's own path, so memories stored from worktrees may sit under paths no session uses any more. Move each one to its main checkout with `memory_update(memory_id=..., project_dir=...)`; the old path is kept in the memory's `metadata.previous_project_dirs`.
 
 ### `precompact-enforce.sh` always writes a mechanical floor
 
@@ -475,7 +491,7 @@ Stop and inspect `docker ps -a`, Compose ownership, mounts, and logs. Do not del
 Negligible. It runs in-memory against already-retrieved candidates, no new DB queries. Expect <5ms overhead per search for typical memory sizes.
 
 **Can I run multiple projects' memories in one johnny-five instance?**
-Yes. Every store/search/recall accepts `project_dir` as a scope. Hooks derive it from payload `cwd` or current cwd. One canonical container serves every project.
+Yes. Every store/search/recall accepts `project_dir` as a scope. Hooks resolve it to the repository's main checkout (see [How hooks choose `project_dir`](#how-hooks-choose-project_dir)). One canonical container serves every project.
 
 **Do clients auto-restart johnny-five if the container dies?**
 No client hook starts or creates the service. Docker Compose owns lifecycle; inspect failures before restarting only the existing canonical service.

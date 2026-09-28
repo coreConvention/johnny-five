@@ -151,7 +151,7 @@ set this for you.)
 | `memory_store` | Store a memory with automatic near-duplicate detection and merge |
 | `memory_search` | Multi-signal retrieval: semantic similarity + recency + frequency + importance |
 | `memory_recall` | Session-start recall — loads high-importance memories + semantically relevant context |
-| `memory_update` | Update content, importance, tags, or type (content changes re-embed automatically) |
+| `memory_update` | Update content, importance, tags, type, or project scope (content changes re-embed automatically; a scope move keeps the old scope in metadata) |
 | `memory_forget` | Archive (soft delete) or permanently delete a memory |
 | `memory_consolidate` | Cluster and summarize cold-tier memories |
 | `memory_stats` | Database statistics by type and tier |

@@ -187,3 +187,31 @@ def test_uninstall_removes_only_j5_owned_content(tmp_path: Path) -> None:
     assert "User text before" in agents_text
     assert "User text after" in agents_text
     assert "<!-- BEGIN johnny-five-codex -->" not in agents_text
+
+
+@pytest.mark.parametrize(
+    ("containers", "error"),
+    [
+        (["johnny-five"], None),
+        (["johnny-five", "johnny-five-dashboard", "redis"], None),
+        (["johnny-five", "johnny-five-johnny-five-1"], "Multiple Johnny-Five-like containers"),
+        (["johnny-five-johnny-five-1"], "Non-canonical Johnny-Five container"),
+    ],
+)
+def test_container_inventory_tolerates_the_dashboard_sibling(
+    containers: list[str], error: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_installer_module()
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: module.subprocess.CompletedProcess(
+            args, 0, stdout="".join(f"{name}\n" for name in containers), stderr=""
+        ),
+    )
+
+    if error is None:
+        module._validate_container_inventory()
+    else:
+        with pytest.raises(module.InstallerError, match=error):
+            module._validate_container_inventory()

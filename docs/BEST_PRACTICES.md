@@ -89,9 +89,9 @@ LangGraph's memory docs recommend the same pattern with `(user_id, agent_id, thr
 
 ### Common scoping mistakes
 
-1. **Hardcoded paths.** `project_dir="/Users/me/work/foo"` breaks when you move the repo, mount it in Docker, or check it out as a worktree. Always use hook payload `cwd` or the current working directory.
+1. **Hardcoded paths.** `project_dir="/Users/me/work/foo"` breaks when you move the repo or mount it in Docker. Use the value the hooks resolve, shown in the `# Resume Context` header.
 2. **No project_dir at all.** Memories without `project_dir` are global — they show up in every project's recall. This is sometimes correct (genuine cross-project user preferences) but usually a bug.
-3. **Worktree path mismatch.** A worktree's path is *not* the parent repo's path. If you stored memories with the parent path and now you're in a worktree, scoping won't match. Fix: pick one canonical path (the parent) and always use it.
+3. **Worktree path mismatch.** A git worktree's path is *not* its repository's path, and scope matching is by exact path. The hooks therefore resolve every worktree, and every subdirectory, to the repository's main checkout: `J5_PROJECT_DIR` if set, else the parent of `git rev-parse --path-format=absolute --git-common-dir` (see [INTEGRATION.md](INTEGRATION.md#how-hooks-choose-project_dir)). Manual calls must do the same and never pass the worktree's own path. A separate clone has its own git directory and does not resolve to the main checkout; set `J5_PROJECT_DIR` there to share its scope. Move memories already stored under a worktree path with `memory_update(memory_id=..., project_dir=...)`.
 
 ---
 

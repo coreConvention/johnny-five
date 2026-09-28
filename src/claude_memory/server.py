@@ -249,6 +249,15 @@ async def list_tools() -> list[Tool]:
                         "enum": ["user", "feedback", "project", "reference", "lesson"],
                         "description": "New memory type",
                     },
+                    "project_dir": {
+                        "type": "string",
+                        "description": (
+                            "Move the memory to this project directory scope (a git "
+                            "repository's main checkout, never a worktree path). Must be "
+                            "non-blank; the previous scope is kept in "
+                            "metadata.previous_project_dirs."
+                        ),
+                    },
                 },
                 "required": ["memory_id"],
             },

@@ -134,15 +134,8 @@ def _git_bash_path(path: Path) -> str:
     return f"/{drive}/{tail}"
 
 
-def _run_correction_hook(
-    payload: dict[str, Any],
-    temp_home: Path,
-) -> subprocess.CompletedProcess[str]:
-    deployed_hooks = temp_home / "hooks"
-    deployed_hooks.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(HOOKS_DIR / "user-prompt-correction.sh", deployed_hooks)
-    shutil.copytree(HOOKS_DIR / "lib", deployed_hooks / "lib", dirs_exist_ok=True)
-
+def _bash_executable() -> str:
+    # On Windows, PATH's bash may be WSL's, which cannot run these hooks.
     bash = shutil.which("bash")
     if os.name == "nt":
         git_bash = (
@@ -154,6 +147,19 @@ def _run_correction_hook(
         if git_bash.is_file():
             bash = str(git_bash)
     assert bash is not None
+    return bash
+
+
+def _run_correction_hook(
+    payload: dict[str, Any],
+    temp_home: Path,
+) -> subprocess.CompletedProcess[str]:
+    deployed_hooks = temp_home / "hooks"
+    deployed_hooks.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HOOKS_DIR / "user-prompt-correction.sh", deployed_hooks)
+    shutil.copytree(HOOKS_DIR / "lib", deployed_hooks / "lib", dirs_exist_ok=True)
+
+    bash = _bash_executable()
 
     hook_path = _git_bash_path(deployed_hooks / "user-prompt-correction.sh")
     wrapper = r'''
@@ -323,3 +329,350 @@ def test_correction_hook_matches_codex_correction_prompt(tmp_path: Path) -> None
         ).read_text(encoding="utf-8")
     )
     assert state["correction_seen"] is True
+
+
+# ---------------------------------------------------------------------------
+# Project scope resolution (issue #38). The server matches project_dir by exact
+# path, so every checkout of a repository must resolve to its main checkout.
+# ---------------------------------------------------------------------------
+
+
+_SCOPE_OVERRIDES = ("J5_PROJECT_DIR", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The test process environment minus anything that would override scope."""
+    env = {key: value for key, value in os.environ.items() if key not in _SCOPE_OVERRIDES}
+    return env | (extra or {})
+
+
+def _git(repo: Path, *args: str, env: dict[str, str]) -> None:
+    subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+
+
+@pytest.fixture()
+def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A main checkout plus a linked worktree on branch ``topic``."""
+    # Isolate the fixture from the machine's git config (signing, hooksPath).
+    empty_config = tmp_path / "gitconfig"
+    empty_config.write_text("", encoding="utf-8")
+    env = _clean_env({"GIT_CONFIG_GLOBAL": str(empty_config), "GIT_CONFIG_NOSYSTEM": "1"})
+
+    main = tmp_path / "main"
+    (main / "sub").mkdir(parents=True)
+    _git(main, "init", "-q", "-b", "main", env=env)
+    _git(
+        main,
+        "-c",
+        "user.name=j5-test",
+        "-c",
+        "user.email=j5-test@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+        env=env,
+    )
+    worktree = tmp_path / "worktrees" / "brave-turing-1a2b3c"
+    _git(main, "worktree", "add", "-q", "-b", "topic", str(worktree), env=env)
+    return main, worktree
+
+
+def _is_dir(reported: str, expected: Path) -> bool:
+    return bool(reported) and Path(reported).resolve() == expected.resolve()
+
+
+def _run_runtime(
+    script: str,
+    *args: str,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Source the shared runtime and run a snippet against it."""
+    lib = _git_bash_path(HOOKS_DIR / "lib" / "j5-runtime.sh")
+    return subprocess.run(
+        [_bash_executable(), "-c", f'source "{lib}"\n{script}', "j5-test", *args],
+        cwd=cwd,
+        env=_clean_env(env),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def _resolve_project(
+    payload_cwd: str,
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> str:
+    result = _run_runtime('j5_project_cwd "$1"', payload_cwd, cwd=cwd, env=env)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_project_dir_of_main_checkout_is_unchanged(repo_with_worktree: tuple[Path, Path]) -> None:
+    main, _ = repo_with_worktree
+
+    assert _is_dir(_resolve_project(str(main), cwd=main), main)
+
+
+def test_project_dir_of_worktree_is_its_main_checkout(repo_with_worktree: tuple[Path, Path]) -> None:
+    main, worktree = repo_with_worktree
+
+    assert _is_dir(_resolve_project(str(worktree), cwd=worktree), main)
+
+
+def test_project_dir_of_subdirectory_is_its_main_checkout(repo_with_worktree: tuple[Path, Path]) -> None:
+    main, _ = repo_with_worktree
+
+    assert _is_dir(_resolve_project(str(main / "sub"), cwd=main), main)
+
+
+def test_project_dir_override_wins(repo_with_worktree: tuple[Path, Path]) -> None:
+    _, worktree = repo_with_worktree
+
+    reported = _resolve_project(
+        str(worktree), cwd=worktree, env={"J5_PROJECT_DIR": "Z:/Personal/override"}
+    )
+
+    assert reported == "Z:/Personal/override"
+
+
+def test_project_dir_outside_git_falls_back_to_the_directory(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    # The ceiling stops git from finding a repository above the temp dir.
+    reported = _resolve_project(
+        str(plain), cwd=plain, env={"GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    )
+
+    assert reported == str(plain)
+
+
+def test_missing_payload_cwd_falls_back_to_the_hook_directory(
+    repo_with_worktree: tuple[Path, Path],
+) -> None:
+    main, worktree = repo_with_worktree
+
+    for payload_cwd in ("", str(worktree / "deleted-since")):
+        assert _is_dir(_resolve_project(payload_cwd, cwd=worktree), main)
+
+
+def test_project_dir_ignores_an_inherited_git_dir(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    main, worktree = repo_with_worktree
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], env=_clean_env(), check=True, capture_output=True)
+
+    reported = _resolve_project(
+        str(worktree), cwd=worktree, env={"GIT_DIR": str(other / ".git")}
+    )
+
+    assert _is_dir(reported, main)
+
+
+# ---------------------------------------------------------------------------
+# Hooks end to end with the Codex payload shape. A stub `docker` reports the
+# running containers and echoes the scope the hook would send to Johnny-Five.
+# ---------------------------------------------------------------------------
+
+_SCOPE_KEYS = ("NB_CWD", "NB_SESSION_CWD", "NB_SESSION_ROOT", "NB_BRANCH", "NB_SID")
+
+_DOCKER_SCOPE_STUB = r'''
+docker() {
+    if [ "$1" = "ps" ]; then
+        printf '%s\n' $J5_TEST_CONTAINERS
+        return 0
+    fi
+    if [ "$1" = "exec" ]; then
+        cat >/dev/null
+        python -c '
+import json, os, sys
+scope = {key: os.environ.get(key, "") for key in sys.argv[2:]}
+print(json.dumps({"hookSpecificOutput": {"hookEventName": sys.argv[1], "additionalContext": json.dumps(scope)}}), end="")
+' "$J5_TEST_EVENT" NB_CWD NB_SESSION_CWD NB_SESSION_ROOT NB_BRANCH NB_SID
+        return 0
+    fi
+    return 1
+}
+export -f docker
+"$1"
+'''
+
+
+def _run_hook_for_scope(
+    hook_name: str,
+    fixture_name: str,
+    session_cwd: Path,
+    tmp_path: Path,
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    deployed_hooks = tmp_path / "home" / "hooks"
+    deployed_hooks.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HOOKS_DIR / hook_name, deployed_hooks)
+    shutil.copytree(HOOKS_DIR / "lib", deployed_hooks / "lib", dirs_exist_ok=True)
+    payload = _fixture(fixture_name) | {"cwd": str(session_cwd)}
+
+    result = subprocess.run(
+        [_bash_executable(), "-c", _DOCKER_SCOPE_STUB, "j5-test", _git_bash_path(deployed_hooks / hook_name)],
+        input=json.dumps(payload),
+        cwd=session_cwd,
+        env=_clean_env(
+            {
+                "J5_TEST_CONTAINERS": "johnny-five johnny-five-dashboard",
+                "J5_TEST_EVENT": payload["hook_event_name"],
+            }
+            | (env or {})
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    scope: dict[str, str] = json.loads(output["hookSpecificOutput"]["additionalContext"])
+    assert set(scope) == set(_SCOPE_KEYS)
+    return scope
+
+
+def test_session_start_in_worktree_recalls_main_checkout_scope(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    main, worktree = repo_with_worktree
+
+    scope = _run_hook_for_scope(
+        "session-start-recall.sh", "codex-session-start.json", worktree, tmp_path
+    )
+
+    assert _is_dir(scope["NB_CWD"], main)
+    assert _is_dir(scope["NB_SESSION_ROOT"], worktree)
+
+
+def test_session_start_in_main_checkout_names_no_other_checkout(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    main, _ = repo_with_worktree
+
+    scope = _run_hook_for_scope(
+        "session-start-recall.sh", "codex-session-start.json", main, tmp_path
+    )
+
+    assert _is_dir(scope["NB_CWD"], main)
+    assert scope["NB_SESSION_ROOT"] == ""
+
+
+def test_session_start_does_not_call_an_overridden_clone_a_worktree(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    # A separate clone is its own main checkout; the override points it at a
+    # shared scope, but that does not make it a worktree.
+    main, _ = repo_with_worktree
+
+    scope = _run_hook_for_scope(
+        "session-start-recall.sh",
+        "codex-session-start.json",
+        main,
+        tmp_path,
+        env={"J5_PROJECT_DIR": "Z:/Personal/override"},
+    )
+
+    assert scope["NB_CWD"] == "Z:/Personal/override"
+    assert scope["NB_SESSION_ROOT"] == ""
+
+
+def test_precompact_scopes_to_main_checkout_but_records_the_worktree(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    main, worktree = repo_with_worktree
+
+    scope = _run_hook_for_scope(
+        "precompact-enforce.sh", "codex-pre-compact.json", worktree, tmp_path
+    )
+
+    assert _is_dir(scope["NB_CWD"], main)
+    assert _is_dir(scope["NB_SESSION_CWD"], worktree)
+    assert scope["NB_BRANCH"] == "topic"
+    assert scope["NB_SID"] == _fixture("codex-pre-compact.json")["session_id"]
+
+
+def test_hooks_honor_the_project_override(
+    repo_with_worktree: tuple[Path, Path], tmp_path: Path
+) -> None:
+    _, worktree = repo_with_worktree
+
+    scope = _run_hook_for_scope(
+        "precompact-enforce.sh",
+        "codex-pre-compact.json",
+        worktree,
+        tmp_path,
+        env={"J5_PROJECT_DIR": "Z:/Personal/override"},
+    )
+
+    assert scope["NB_CWD"] == "Z:/Personal/override"
+    assert scope["NB_BRANCH"] == "topic"
+
+
+# ---------------------------------------------------------------------------
+# Canonical-container check (issue #35). A second memory server is the hazard;
+# the dashboard sibling from docker-compose.yml is not.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("containers", "expected"),
+    [
+        ("johnny-five", "ATTACH"),
+        ("johnny-five johnny-five-dashboard", "ATTACH"),
+        ("redis johnny-five ravendb", "ATTACH"),
+        (
+            "johnny-five johnny-five-johnny-five-1",
+            "REFUSE:multiple Johnny-Five-like containers are running "
+            "(johnny-five johnny-five-johnny-five-1); refusing to attach",
+        ),
+        (
+            "johnny-five johnny-five-dashboard johnny_five_orphan",
+            "REFUSE:multiple Johnny-Five-like containers are running "
+            "(johnny-five johnny_five_orphan); refusing to attach",
+        ),
+        (
+            "johnny-five-johnny-five-1",
+            "REFUSE:a non-canonical Johnny-Five-like container is running "
+            "(johnny-five-johnny-five-1); refusing to attach",
+        ),
+        ("johnny-five-dashboard", "REFUSE:canonical johnny-five container is not running"),
+        ("", "REFUSE:canonical johnny-five container is not running"),
+    ],
+)
+def test_canonical_container_check(containers: str, expected: str, tmp_path: Path) -> None:
+    script = (
+        "docker() { printf '%s\\n' $J5_TEST_CONTAINERS; }\n"
+        "if j5_require_canonical_container; then printf ATTACH; "
+        'else printf "REFUSE:%s" "$J5_CONTAINER_DIAGNOSTIC"; fi'
+    )
+
+    result = _run_runtime(script, cwd=tmp_path, env={"J5_TEST_CONTAINERS": containers})
+
+    assert result.stdout == expected
+
+
+def test_known_siblings_match_the_compose_services() -> None:
+    from tests.test_install_codex import _load_installer_module
+
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    services = set(re.findall(r"^\s*container_name:\s*(\S+)\s*$", compose, re.MULTILINE))
+    runtime = (HOOKS_DIR / "lib" / "j5-runtime.sh").read_text(encoding="utf-8")
+    runtime_match = re.search(r'^J5_KNOWN_SIBLINGS="([^"]*)"$', runtime, re.MULTILINE)
+    assert runtime_match is not None
+    runtime_siblings = set(runtime_match.group(1).split("|"))
+    installer_siblings = set(_load_installer_module().J5_KNOWN_SIBLINGS)
+
+    assert "johnny-five" in services
+    assert services - {"johnny-five"} == runtime_siblings == installer_siblings

@@ -77,7 +77,8 @@ function main() {
       `\`mcp__johnny-five__memory_store\` once. Before ending, decide:\n\n` +
       `  (a) Store at least one lesson/project memory now (preferred). Search first ` +
       `with \`memory_search\` to avoid duplicates, then \`memory_store\` with ` +
-      `project_dir set to the current repo and importance ≥6 for genuine lessons. ` +
+      `project_dir set to the repository's main checkout (from a worktree too) ` +
+      `and importance ≥6 for genuine lessons. ` +
       `What to capture: user corrections, non-obvious bug root causes, silent ` +
       `typo/config-mismatch gotchas, ★ Insight architectural connections, patterns ` +
       `likely to recur. Then end the turn — the next Stop will pass.\n\n` +
@@ -103,7 +104,8 @@ function main() {
       `(user-prompt-correction.sh detected one of "actually", "does not match", ` +
       `"i wanted", "why is", "are you using", etc.) but no \`mcp__johnny-five__memory_search\` ` +
       `call has happened since. Before ending, run a memory_search relevant to ` +
-      `the user's correction (search for the topic + the project_dir of cwd) so ` +
+      `the user's correction (search for the topic, scoped to the project_dir ` +
+      `in the Resume Context header) so ` +
       `you can check whether you already had the answer stored.\n\n` +
       `Search-first is the load-bearing rule of the self-improvement loop. ` +
       `When the user corrects you, the most common cause is that you skipped a ` +

@@ -29,7 +29,6 @@ if [ -z "$parsed" ]; then
 fi
 
 IFS=$'\x1f' read -r PROMPT CWD SID <<< "$parsed"
-CWD="$(j5_project_cwd "$CWD")"
 PROMPT="$(printf '%s' "$PROMPT" | head -c 1000)"
 
 # Correction-signal regex. Case-insensitive. Cost balance: a false positive is
@@ -84,6 +83,9 @@ if ! j5_require_canonical_container; then
     exit 0
 fi
 
+# Resolved only now: this hook runs on every prompt, and resolving the project
+# costs a git call that non-correction prompts never need.
+CWD="$(j5_project_cwd "$CWD")"
 export NB_CWD="$CWD"
 export NB_QUERY="$(printf '%s' "$PROMPT" | head -c 300)"
 
