@@ -21,12 +21,17 @@ source "$SCRIPT_DIR/lib/j5-runtime.sh"
 j5_load_payload
 parsed="$(j5_payload_fields cwd session_id trigger)"
 IFS=$'\x1f' read -r PAYLOAD_CWD SID TRIGGER <<< "$parsed"
+SESSION_CWD="$(j5_session_cwd "$PAYLOAD_CWD")"
 CWD="$(j5_project_cwd "$PAYLOAD_CWD")"
 export NB_CWD="$CWD"
+export NB_SESSION_CWD="$SESSION_CWD"
+export NB_SID="$SID"
 
-# Collect cheap git context (runs on host, not in container)
-export NB_BRANCH="$(cd "$CWD" 2>/dev/null && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-export NB_RECENT="$(cd "$CWD" 2>/dev/null && git status --porcelain 2>/dev/null | head -10 | tr '\n' '|' || echo '')"
+# Collect cheap git context (runs on host, not in container). It comes from the
+# session's own checkout: in a linked worktree the project scope is the main
+# checkout, but the branch and pending changes belong to the worktree.
+export NB_BRANCH="$(j5_git -C "$SESSION_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+export NB_RECENT="$(j5_git -C "$SESSION_CWD" status --porcelain 2>/dev/null | head -10 | tr '\n' '|' || echo '')"
 
 if ! j5_require_canonical_container; then
   j5_emit_context "PreCompact" "precompact-enforce: $J5_CONTAINER_DIAGNOSTIC. Compaction proceeds without a memory floor; restore SSE and start a fresh task."
@@ -35,7 +40,7 @@ fi
 
 # Ask johnny-five: do we already have a recent session-state? If not, write a floor.
 # Python inside the container always emits valid JSON on stdout (try/except-wrapped).
-output="$(docker exec -i -e NB_CWD -e NB_BRANCH -e NB_RECENT johnny-five python <<'PYEOF' 2>/dev/null
+output="$(docker exec -i -e NB_CWD -e NB_SESSION_CWD -e NB_SID -e NB_BRANCH -e NB_RECENT johnny-five python <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +50,8 @@ def emit(payload):
 
 async def main():
     cwd = os.environ.get('NB_CWD', '') or ''
+    session_cwd = os.environ.get('NB_SESSION_CWD', '') or cwd
+    sid = os.environ.get('NB_SID', '') or None
     branch = os.environ.get('NB_BRANCH', 'unknown')
     recent = os.environ.get('NB_RECENT', '')
     try:
@@ -85,10 +92,13 @@ async def main():
 
     # Write mechanical floor
     recent_files = [line for line in recent.split('|') if line.strip()]
+    # "cwd" records the checkout the session worked in, so a reader can tell
+    # which worktree this floor came from. The memory itself is stored under
+    # the project scope (NB_CWD), which every checkout of the repo shares.
     floor = {
         "prompt_file": None,
         "branch": branch,
-        "cwd": cwd,
+        "cwd": session_cwd,
         "current_step": "MECHANICAL FLOOR \u2014 hook wrote this because model did not store a rich session-state before compaction",
         "completed_steps": [],
         "blockers": ["Model-authored summary missing; re-read this memory plus CLAUDE.md plus any open plan file to reconstruct context"],
@@ -106,6 +116,7 @@ async def main():
             tags=['session-state', 'precompact', 'mechanical-floor'],
             importance=7.0,
             project_dir=cwd,
+            source_session=sid,
             metadata={"floor": True, "branch": branch},
         )
         emit({

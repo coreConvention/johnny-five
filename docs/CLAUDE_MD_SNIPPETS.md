@@ -72,8 +72,8 @@ Use **only** for: core user preferences that define your behavior, critical work
 
 ### Project scoping (LOAD-BEARING — do not get this wrong)
 
-- Memories are scoped per-project via the `project_dir` parameter.
-- **Never hardcode a project path.** Use hook payload `cwd` or the current working directory. Loading the wrong project's memories silently pollutes your context.
+- Memories are scoped per-project via the `project_dir` parameter, matched by exact path.
+- **Pass the `project_dir` shown in the `# Resume Context` header.** The hooks resolve it the same way every time: `J5_PROJECT_DIR` if set; otherwise, inside a git repository, the main checkout (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`), so every git worktree shares its repository's memories; otherwise the working directory. **Never pass a git worktree's own path, and never hardcode a path.** A wrong scope silently hides the project's memories or pollutes another project's.
 - The `SessionStart` hook auto-recalls memories scoped to the current project. You see them as `# Resume Context`. **Don't call `memory_recall` again unless you need a DIFFERENT project's memories** — prefer `memory_search` for targeted queries within the current project.
 
 ### Session continuity (compaction survival)
@@ -108,7 +108,7 @@ If the service must be restored, restart only the existing Compose service after
 | Symptom | Cause | Fix |
 |---|---|---|
 | `memory_*` tools missing | Container not running at session start | Start Docker, restart Claude Code session |
-| `memory_search` returns nothing | Wrong `project_dir`, or fresh DB | Verify cwd; check `memory_stats` |
+| `memory_search` returns nothing | Wrong `project_dir` (such as a git worktree's path), or fresh DB | Pass the `project_dir` from the Resume Context header; check `memory_stats` |
 | Resume context shows "mechanical-floor" tag | Last session didn't store rich state | Inspect `git status`/`git log`; ask user if needed |
 | Same lesson stored twice | Skipped search-before-store | `memory_update` to merge; tighten the loop next time |
 
@@ -128,7 +128,7 @@ Smaller. Drops into a per-project CLAUDE.md to remind Claude that THIS project i
 
 This project is wired into the johnny-five memory system. The global discipline rules in `~/.claude/CLAUDE.md` apply. Project-specific notes:
 
-- `project_dir` for this project: use hook payload `cwd` or the current working directory; do not hardcode a path that could break across machines.
+- `project_dir` for this project: the repository's main checkout, as shown in the `# Resume Context` header (from a git worktree too, never the worktree's own path); do not hardcode a path that could break across machines.
 - Lesson tags worth using here: `<fill in: e.g. database, multi-tenant, graphql, deployment>`. Add tags as patterns emerge; don't over-engineer the taxonomy upfront.
 - File-based backup of lessons (optional): `.claude/memory/lessons.md` — append a structured `[Category] Description → Mistake → Correction → Rule` entry whenever you `memory_store` a lesson, so the file is grep-able even when the container is down.
 <!-- END johnny-five-project -->
@@ -152,7 +152,7 @@ The canonical hooks JSON lives in **`setup/hooks.json.enforced.snippet`** at the
 
 **Search before storing** — Avoids duplicate memories that pollute future searches. Validated by every dedup-aware system in the literature (A-MEM, MemGPT). J5 has dedup on store as a safety net, but searching first is cheaper and more disciplined.
 
-**Project scoping is load-bearing** — Cross-project memory pollution is silent; you don't get an error, you just get bad recommendations from the wrong project's context. Validated by MCP `roots` spec ([modelcontextprotocol.io](https://modelcontextprotocol.io/)) and LangGraph namespacing. Hardcoded paths break when the cwd shifts (worktrees, mounted Docker volumes, CI runners).
+**Project scoping is load-bearing** — Cross-project memory pollution is silent; you don't get an error, you just get bad recommendations from the wrong project's context. Validated by MCP `roots` spec ([modelcontextprotocol.io](https://modelcontextprotocol.io/)) and LangGraph namespacing. Hardcoded paths break when the cwd shifts (mounted Docker volumes, CI runners). A raw cwd has the opposite problem: it splits one repository into many scopes, one per git worktree and subdirectory, and each sees none of the others' memories. That is why the hooks resolve the repository's main checkout.
 
 **Importance 0–10 with reserved 10 for compaction** — The 1–10 LLM-rated importance scale comes directly from Generative Agents (Park et al. 2023, [arXiv:2304.03442](https://arxiv.org/abs/2304.03442)). Reserving 10 for session-state-before-compaction means those memories never decay out of the always-load tier of `memory_recall`.
 

@@ -42,7 +42,6 @@ if [ -z "$parsed" ]; then
 fi
 
 IFS=$'\x1f' read -r TOOL FILE_PATH CMD CWD SID <<< "$parsed"
-CWD="$(j5_project_cwd "$CWD")"
 SID="${SID:-unknown}"
 CMD="$(printf '%s' "$CMD" | head -c 500)"
 
@@ -158,6 +157,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Search johnny-five and emit additionalContext
 # ---------------------------------------------------------------------------
+# Resolved only now: this hook runs on every matching tool call, and resolving
+# the project costs a git call that most invocations never need.
+CWD="$(j5_project_cwd "$CWD")"
 export NB_CWD="$CWD"
 export NB_QUERY="$QUERY"
 export NB_KEY="$KEY"

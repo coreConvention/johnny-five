@@ -25,12 +25,24 @@ IFS=$'\x1f' read -r PAYLOAD_CWD SID <<< "$parsed"
 CWD="$(j5_project_cwd "$PAYLOAD_CWD")"
 export NB_CWD="$CWD"
 
+# A linked worktree shares its scope, session-state included, with every other
+# checkout of the repository. Name this session's own checkout so the reader
+# can tell whether a recalled session-state is theirs. Git itself says whether
+# this is a linked worktree: its own git dir differs from the common one. Git
+# before 2.31 echoes --path-format back as a first line; treat that as unknown.
+WORKTREE_INFO="$(j5_git -C "$(j5_session_cwd "$PAYLOAD_CWD")" rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel 2>/dev/null)"
+case "$WORKTREE_INFO" in --*) WORKTREE_INFO="" ;; esac
+{ read -r OWN_GIT_DIR; read -r COMMON_GIT_DIR; read -r SESSION_ROOT; } <<< "$WORKTREE_INFO"
+if [ -n "$SESSION_ROOT" ] && [ "$OWN_GIT_DIR" != "$COMMON_GIT_DIR" ]; then
+  export NB_SESSION_ROOT="$SESSION_ROOT"
+fi
+
 if ! j5_require_canonical_container; then
   j5_emit_context "SessionStart" "session-start-recall: $J5_CONTAINER_DIAGNOSTIC. Restore the canonical SSE service, then start a fresh task to reload MCP tools."
   exit 0
 fi
 
-output="$(docker exec -i -e NB_CWD johnny-five python <<'PYEOF' 2>/dev/null
+output="$(docker exec -i -e NB_CWD -e NB_SESSION_ROOT johnny-five python <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
 
 def emit(context_str):
@@ -44,6 +56,7 @@ def emit(context_str):
 
 async def main():
     cwd = os.environ.get('NB_CWD', '') or ''
+    session_root = os.environ.get('NB_SESSION_ROOT', '') or ''
     try:
         from claude_memory.mcp import tools
     except Exception as e:
@@ -84,6 +97,8 @@ async def main():
 
     lines = ["# Resume Context (auto-recalled by session-start-recall hook)", ""]
     lines.append(f"Scoped to `project_dir={cwd}`. {len(results)} memories loaded.")
+    if session_root:
+        lines.append(f"This session runs in the git worktree `{session_root}`, which shares this project's memories; pass the project_dir above on manual memory calls.")
 
     if session_state:
         created = (session_state.get('created_at') or '?')[:19].replace('T', ' ')
@@ -100,6 +115,9 @@ async def main():
         if floor_tag:
             lines.append("")
             lines.append("> NOTE: this session-state was written by precompact-enforce (mechanical floor), not by the model. Inspect git log/status and any open plan file to reconstruct richer context.")
+        if session_root:
+            lines.append("")
+            lines.append("> NOTE: every checkout of this project shares one session-state, so this one may come from another worktree. Compare its branch and cwd with this session before resuming from it.")
 
     if projects:
         lines.append("")

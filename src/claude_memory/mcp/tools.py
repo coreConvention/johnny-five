@@ -35,6 +35,7 @@ from claude_memory.retrieval.search import (
     recall_session_memories,
     search_memories,
 )
+from claude_memory.scope import is_exact_scope_match
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +396,7 @@ async def tool_memory_update(
     importance: float | None = None,
     tags: list[str] | None = None,
     type: str | None = None,
+    project_dir: str | None = None,
 ) -> dict:
     """Update an existing memory.
 
@@ -413,6 +415,13 @@ async def tool_memory_update(
         New tag list (replaces existing tags).
     type:
         New memory type.
+    project_dir:
+        Move the memory to this project scope, e.g. from a git worktree's path
+        to the repository's main checkout (issue #38). It must be non-blank:
+        widening a project memory to global is a visibility change this tool
+        refuses to make. A move to a different canonical scope appends the old
+        scope to ``metadata["previous_project_dirs"]``, so it can be audited
+        and reversed.
     """
     conn, encoder, settings = _get_deps()
     try:
@@ -431,6 +440,23 @@ async def tool_memory_update(
             fields["tags"] = tags
         if type is not None:
             fields["type"] = type
+        if project_dir is not None:
+            if not project_dir.strip():
+                return {
+                    "updated": False,
+                    "memory_id": memory_id,
+                    "error": "project_dir must be a non-blank path; memory_update never makes a memory global",
+                }
+            fields["project_dir"] = project_dir
+            if not is_exact_scope_match(existing.project_dir, project_dir):
+                history = existing.metadata.get("previous_project_dirs")
+                fields["metadata"] = {
+                    **existing.metadata,
+                    "previous_project_dirs": [
+                        *(history if isinstance(history, list) else []),
+                        existing.project_dir,
+                    ],
+                }
 
         if not fields:
             return {"updated": False, "memory_id": memory_id, "error": "No fields to update"}

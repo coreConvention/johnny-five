@@ -28,6 +28,9 @@ J5_RUNTIME_FILES = ("j5-runtime.sh", "j5-runtime.js")
 BEGIN_MARKER = "<!-- BEGIN johnny-five-codex -->"
 END_MARKER = "<!-- END johnny-five-codex -->"
 CANONICAL_WINDOWS_SOURCE = Path(r"Z:\Personal\johnny-five")
+# Compose services named like johnny-five that are not memory servers. Mirrors
+# J5_KNOWN_SIBLINGS in setup/hooks/lib/j5-runtime.sh (#35).
+J5_KNOWN_SIBLINGS = ("johnny-five-dashboard",)
 
 
 class InstallerError(RuntimeError):
@@ -289,7 +292,11 @@ def _validate_container_inventory() -> None:
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise InstallerError(f"Cannot inspect Docker container inventory: {error}") from error
-    j5_like = [name for name in result.stdout.splitlines() if "johnny-five" in name.lower()]
+    j5_like = [
+        name
+        for name in result.stdout.splitlines()
+        if "johnny-five" in name.lower() and name not in J5_KNOWN_SIBLINGS
+    ]
     if len(j5_like) > 1:
         raise InstallerError(f"Multiple Johnny-Five-like containers exist: {', '.join(j5_like)}")
     if j5_like and j5_like != ["johnny-five"]:

@@ -113,6 +113,7 @@ class UpdateRequest(BaseModel):
     type: str | None = Field(
         default=None, pattern="^(user|feedback|project|reference|lesson)$"
     )
+    project_dir: str | None = None
 
 
 class ForgetRequest(BaseModel):

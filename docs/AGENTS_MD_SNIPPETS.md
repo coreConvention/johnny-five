@@ -15,7 +15,7 @@ The block establishes these invariants:
 
 - Johnny-Five is the primary persistent memory store.
 - Global hooks already perform session recall; do not repeat it manually at startup.
-- Project scope comes from hook payload `cwd` or the current working directory.
+- Project scope is the repository's main checkout, resolved like the hooks do (`J5_PROJECT_DIR` overrides it). A git worktree shares that scope and never uses its own path.
 - Search happens before investigation, authoring decisions, corrections, and stores.
 - The only runtime is the canonical `johnny-five` SSE container on port 8787.
 - A restored service requires a fresh Codex task before MCP tools can appear.
@@ -27,7 +27,7 @@ Projects need only a short hint when their main `AGENTS.md` does not already des
 ```markdown
 ## Memory
 
-Johnny-Five is configured globally. Scope manual `memory_*` calls to this repository's current working directory. Search before investigating or deciding, and update matching memories instead of storing duplicates.
+Johnny-Five is configured globally. Scope manual `memory_*` calls to this repository's main checkout, also from a git worktree. Search before investigating or deciding, and update matching memories instead of storing duplicates.
 ```
 
 Do not install the same Johnny-Five hooks again at project level. Codex runs matching hooks from every active layer concurrently, so duplicate global and project registrations cause duplicate searches and counter updates.
