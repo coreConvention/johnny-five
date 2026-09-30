@@ -10,6 +10,8 @@ import pytest
 
 from claude_memory.db.queries import (
     MemoryRecord,
+    _register_read_scope_function,
+    _register_recall_scope_function,
     get_always_load,
     insert_memory,
     search_fts,
@@ -20,6 +22,7 @@ from claude_memory.retrieval.search import (
     recall_session_memories,
     search_memories,
 )
+from claude_memory.scope import is_read_scope_compatible, is_recall_scope_compatible
 
 from tests.conftest import MockEncoder
 
@@ -518,3 +521,224 @@ class TestCanonicalScopeCandidateAcquisition:
             )
 
         assert [result.memory.id for result in results] == ["global"]
+
+
+class TestVectorScopeAppliedBeforeLimit:
+    """Defect: search_vec's LIMIT used to run before any project-scope check.
+
+    Unlike search_fts (which has always applied its scope predicate inside
+    the query, before LIMIT), search_vec used to have no scope awareness at
+    all — scoping happened only afterwards, in search.py, once the pool was
+    already truncated. A flood of closer out-of-scope vectors could fill the
+    entire bounded pool on their own, and every one of them would then be
+    discarded by the later Python-side scope filter — leaving zero semantic
+    compensation for an in-scope match that was never even fetched.
+
+    The fix pushes the scope predicate into search_vec's own SQL, before its
+    LIMIT (the same shape search_fts already used). These tests fake
+    search_vec with a stand-in that faithfully reproduces that scope-then-
+    limit contract and verify search.py now supplies the project_dir /
+    recall_scope it needs — proving the wiring, not the SQL text itself
+    (this suite runs without the compiled sqlite-vec extension, so the real
+    vec0 query can't be executed here; see the session report).
+    """
+
+    def test_search_memories_survives_a_foreign_vector_flood(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """45 closer foreign-project vectors must not evict the in-scope hit."""
+        matching = _make_record(
+            "matching", [], project_dir="/projects/alpha", importance=5.0,
+        )
+        _insert_record(db_conn, mock_encoder, matching)
+        project_dirs: dict[str, str | None] = {"matching": matching.project_dir}
+        for i in range(45):
+            foreign_id = f"foreign-{i}"
+            foreign = _make_record(
+                foreign_id, [], project_dir="/projects/beta", importance=5.0,
+            )
+            _insert_record(db_conn, mock_encoder, foreign)
+            project_dirs[foreign_id] = foreign.project_dir
+
+        def fake_search_vec(
+            conn: sqlite3.Connection,
+            embedding: list[float],
+            top_k: int = 50,
+            project_dir: str | None = None,
+            recall_scope: bool = False,
+            required_tags: list[str] | None = None,
+        ) -> list[tuple[str, float]]:
+            # Every foreign vector ranks closer than "matching" — the shape
+            # that starves a scope-blind pool. Branches exactly like the
+            # real search_vec SQL so this is a faithful stand-in.
+            ranked: list[tuple[str, float]] = [
+                (f"foreign-{i}", 0.01 + i * 0.001) for i in range(45)
+            ]
+            ranked.append(("matching", 0.90))
+            if recall_scope:
+                compatible = [
+                    (mid, dist) for mid, dist in ranked
+                    if is_recall_scope_compatible(project_dirs[mid], project_dir)
+                ]
+            elif project_dir is not None:
+                compatible = [
+                    (mid, dist) for mid, dist in ranked
+                    if is_read_scope_compatible(project_dirs[mid], project_dir)
+                ]
+            else:
+                compatible = ranked
+            return compatible[:top_k]
+
+        with (
+            patch(
+                "claude_memory.retrieval.search.search_vec",
+                side_effect=fake_search_vec,
+            ) as vec_spy,
+            patch("claude_memory.retrieval.search.search_fts", return_value=[]),
+            patch("claude_memory.retrieval.search.get_always_load", return_value=[]),
+        ):
+            results = search_memories(
+                db_conn,
+                mock_encoder,
+                query="Codex Johnny-Five MCP connectivity",
+                project_dir="/projects/alpha",
+                update_access_on_retrieve=False,
+            )
+
+        assert [result.memory.id for result in results] == ["matching"]
+        assert vec_spy.call_args.kwargs["project_dir"] == "/projects/alpha"
+
+    def test_recall_session_memories_survives_a_foreign_vector_flood(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Vector-pool mirror of
+        test_global_semantic_recall_is_not_starved_by_scoped_fts_matches —
+        same starvation shape, but through the vector pool instead of FTS.
+        """
+        global_record = _make_record("global", [], project_dir=None)
+        _insert_record(db_conn, mock_encoder, global_record)
+        project_dirs: dict[str, str | None] = {"global": None}
+        for index in range(4):
+            foreign_id = f"foreign-{index}"
+            foreign = _make_record(
+                foreign_id, [], project_dir="/projects/beta",
+            )
+            _insert_record(db_conn, mock_encoder, foreign)
+            project_dirs[foreign_id] = foreign.project_dir
+
+        def fake_search_vec(
+            conn: sqlite3.Connection,
+            embedding: list[float],
+            top_k: int = 50,
+            project_dir: str | None = None,
+            recall_scope: bool = False,
+            required_tags: list[str] | None = None,
+        ) -> list[tuple[str, float]]:
+            ranked: list[tuple[str, float]] = [
+                (f"foreign-{i}", 0.01 + i * 0.001) for i in range(4)
+            ]
+            ranked.append(("global", 0.90))
+            if recall_scope:
+                compatible = [
+                    (mid, dist) for mid, dist in ranked
+                    if is_recall_scope_compatible(project_dirs[mid], project_dir)
+                ]
+            elif project_dir is not None:
+                compatible = [
+                    (mid, dist) for mid, dist in ranked
+                    if is_read_scope_compatible(project_dirs[mid], project_dir)
+                ]
+            else:
+                compatible = ranked
+            return compatible[:top_k]
+
+        with (
+            patch(
+                "claude_memory.retrieval.search.search_vec",
+                side_effect=fake_search_vec,
+            ) as vec_spy,
+            patch("claude_memory.retrieval.search.search_fts", return_value=[]),
+        ):
+            results = recall_session_memories(
+                db_conn,
+                mock_encoder,
+                project_dir=None,
+                initial_context="starvation marker",
+                top_k=1,
+            )
+
+        assert [result.memory.id for result in results] == ["global"]
+        assert vec_spy.call_args.kwargs["recall_scope"] is True
+
+
+class TestScopePredicateSqlFunctionMatchesPurePython:
+    """Disclosure + proof for the scope-predicate choice in search_vec's fix.
+
+    search_vec's new id-eligibility pre-filter (the vec0-LIMIT-before-scope
+    fix) calls the SQL functions ``j5_read_scope_compatible`` /
+    ``j5_recall_scope_compatible`` — the same functions search_fts and
+    get_always_load's reservation split already used; nothing new was
+    introduced for this fix, and no separate SQL expression exists anywhere
+    in this codebase for it to have diverged from. Both registered
+    functions (see ``_register_read_scope_function`` /
+    ``_register_recall_scope_function`` in ``claude_memory.db.queries``)
+    are thin ``conn.create_function`` wrappers directly around
+    ``is_read_scope_compatible`` / ``is_recall_scope_compatible``
+    (``claude_memory.scope``) — so there is no independent algorithm to
+    test for equivalence, only the SQLite marshaling boundary itself
+    (``NULL`` <-> ``None``, ``TEXT`` <-> ``str``) that a bug could hide in.
+    This asserts the SQL-callable path agrees with calling the Python
+    function directly across the matrix that boundary could plausibly
+    disturb: project match, foreign, NULL/global, empty string,
+    trailing-separator, and case variants.
+    """
+
+    _MATRIX: list[tuple[str | None, str | None]] = [
+        ("/projects/alpha", "/projects/alpha"),  # exact match
+        ("/projects/alpha", "/projects/beta"),  # foreign
+        (None, "/projects/alpha"),  # record global, scoped requester
+        ("/projects/alpha", None),  # record scoped, unscoped requester
+        (None, None),  # both global
+        ("", "/projects/alpha"),  # blank-string record treated as global
+        ("/projects/alpha", ""),  # blank-string requester treated as global
+        ("   ", "/projects/alpha"),  # whitespace-only record treated as global
+        ("/projects/alpha/", "/projects/alpha"),  # trailing separator, record
+        ("/projects/alpha", "/projects/alpha/"),  # trailing separator, requester
+        ("C:\\FakeProjects\\Alpha", "C:\\FakeProjects\\ALPHA"),  # Windows case-insensitive
+        ("C:\\FakeProjects\\Alpha", "c:/fakeprojects/alpha"),  # Windows slash + case variant
+        ("/Projects/Alpha", "/projects/alpha"),  # POSIX stays case-sensitive -> mismatch
+    ]
+
+    @pytest.mark.parametrize(("record_scope", "requested_scope"), _MATRIX)
+    def test_read_predicate_sql_matches_python(
+        self,
+        db_conn: sqlite3.Connection,
+        record_scope: str | None,
+        requested_scope: str | None,
+    ) -> None:
+        _register_read_scope_function(db_conn)
+        sql_result = db_conn.execute(
+            "SELECT j5_read_scope_compatible(?, ?) AS r",
+            (record_scope, requested_scope),
+        ).fetchone()["r"]
+        python_result: bool = is_read_scope_compatible(record_scope, requested_scope)
+        assert bool(sql_result) == python_result
+
+    @pytest.mark.parametrize(("record_scope", "requested_scope"), _MATRIX)
+    def test_recall_predicate_sql_matches_python(
+        self,
+        db_conn: sqlite3.Connection,
+        record_scope: str | None,
+        requested_scope: str | None,
+    ) -> None:
+        _register_recall_scope_function(db_conn)
+        sql_result = db_conn.execute(
+            "SELECT j5_recall_scope_compatible(?, ?) AS r",
+            (record_scope, requested_scope),
+        ).fetchone()["r"]
+        python_result: bool = is_recall_scope_compatible(record_scope, requested_scope)
+        assert bool(sql_result) == python_result

@@ -44,6 +44,7 @@ fi
 
 output="$(docker exec -i -e NB_CWD -e NB_SESSION_ROOT johnny-five python <<'PYEOF' 2>/dev/null
 import asyncio, json, os, sys
+from datetime import datetime, timezone
 
 def emit(context_str):
     sys.stdout.write(json.dumps({
@@ -63,10 +64,15 @@ async def main():
         emit(f"session-start-recall: could not import claude_memory ({e}). Call memory_recall manually if needed.")
         return
 
+    initial_context = 'session start resume context'
+    if cwd:
+        from claude_memory.scope import project_dir_basename
+        initial_context += ' ' + project_dir_basename(cwd)
+
     try:
         result = await tools.tool_memory_recall(
             project_dir=cwd,
-            initial_context='session start resume context',
+            initial_context=initial_context,
             top_k=15,
         )
     except Exception as e:
@@ -78,21 +84,49 @@ async def main():
         emit(f"session-start-recall: johnny-five reachable but no memories for project_dir={cwd!r} yet. Store insights as you learn them.")
         return
 
-    # Categorise top memories by role.
+    # Resume block: direct lookup of the newest session-state, independent of
+    # recall ranking. state is one of found / none / unavailable / error.
     session_state = None
+    state = 'none'
+    state_detail = ''
+    try:
+        from claude_memory.db import queries
+        from claude_memory.db.connection import get_connection
+        from claude_memory.config import get_settings
+        if getattr(queries, 'get_latest_session_state', None) is None:
+            state = 'unavailable'
+        else:
+            settings = get_settings()
+            conn = get_connection(settings.resolve_db_path(), settings.embedding_dim)
+            try:
+                row = queries.get_latest_session_state(conn, cwd)
+            finally:
+                conn.close()
+            if row is not None:
+                session_state = dict(row)
+                try:
+                    session_state['tags'] = json.loads(session_state.get('tags') or '[]')
+                except (ValueError, TypeError):
+                    session_state['tags'] = []
+                state = 'found'
+    except Exception as e:
+        state = 'error'
+        state_detail = str(e)
+
+    # Categorise top memories by role.
     lessons = []
     preferences = []
     projects = []
     for r in results:
         tags = r.get('tags') or []
         t = r.get('type', '')
-        if not session_state and ('session-state' in tags or 'precompact' in tags):
-            session_state = r
-        elif t == 'lesson' and len(lessons) < 5:
+        if session_state is not None and r.get('id') == session_state.get('id'):
+            continue
+        if t == 'lesson' and len(lessons) < 5:
             lessons.append(r)
         elif t in ('user', 'feedback') and len(preferences) < 3:
             preferences.append(r)
-        elif t == 'project' and len(projects) < 3 and r is not session_state:
+        elif t == 'project' and len(projects) < 3:
             projects.append(r)
 
     lines = ["# Resume Context (auto-recalled by session-start-recall hook)", ""]
@@ -100,14 +134,21 @@ async def main():
     if session_root:
         lines.append(f"This session runs in the git worktree `{session_root}`, which shares this project's memories; pass the project_dir above on manual memory calls.")
 
-    if session_state:
-        created = (session_state.get('created_at') or '?')[:19].replace('T', ' ')
+    if state == 'found':
+        raw_created = session_state.get('created_at') or '?'
+        try:
+            parsed = datetime.fromisoformat(raw_created)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            created = parsed.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        except (ValueError, OverflowError, TypeError):
+            created = raw_created
         content = session_state.get('content') or ''
         preview = content[:800]
         if len(content) > 800:
             preview += "\n... [truncated; full content via memory_recall tag=session-state]"
         lines.append("")
-        lines.append(f"## Last session-state  ({created} UTC, importance {session_state.get('importance', '?')})")
+        lines.append(f"## Last session-state  ({created}, importance {session_state.get('importance', '?')})")
         lines.append("```")
         lines.append(preview)
         lines.append("```")
@@ -118,6 +159,15 @@ async def main():
         if session_root:
             lines.append("")
             lines.append("> NOTE: every checkout of this project shares one session-state, so this one may come from another worktree. Compare its branch and cwd with this session before resuming from it.")
+    else:
+        lines.append("")
+        lines.append("## Last session-state")
+        if state == 'unavailable':
+            lines.append("Unavailable: the running johnny-five server predates get_latest_session_state. Rebuild the image and recreate the container.")
+        elif state == 'error':
+            lines.append(f"Lookup failed ({state_detail}). Call memory_search with tags=['session-state'] manually.")
+        else:
+            lines.append("No session-state memory is recorded for this project_dir yet.")
 
     if projects:
         lines.append("")

@@ -6,9 +6,13 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from claude_memory.scope import is_read_scope_compatible, is_recall_scope_compatible
+from claude_memory.scope import (
+    canonicalize_project_dir,
+    is_read_scope_compatible,
+    is_recall_scope_compatible,
+)
 
 
 @dataclass
@@ -57,6 +61,30 @@ def _register_recall_scope_function(conn: sqlite3.Connection) -> None:
             is_recall_scope_compatible(record_scope, requested_scope)
         ),
         deterministic=True,
+    )
+
+
+def _utc_microseconds(value: object) -> int | None:
+    """Exact UTC microseconds since the epoch for an ISO-8601 string, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        dt: datetime = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Direct aware subtraction: converting to UTC first would overflow for
+        # parseable values at the calendar edge and abort the whole lookup.
+        return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(
+            microseconds=1
+        )
+    except (ValueError, OverflowError):
+        return None
+
+
+def _register_utc_microseconds_function(conn: sqlite3.Connection) -> None:
+    """Register ``j5_utc_microseconds(text)`` for exact instant ordering."""
+    conn.create_function(
+        "j5_utc_microseconds", 1, _utc_microseconds, deterministic=True,
     )
 
 
@@ -233,7 +261,7 @@ def search_fts(
     conn: sqlite3.Connection,
     query: str,
     project_dir: str | None = None,
-    top_k: int = 50,
+    top_k: int | None = 50,
     recall_scope: bool = False,
 ) -> list[tuple[str, float]]:
     """Full-text search via FTS5.
@@ -243,58 +271,86 @@ def search_fts(
     is provided, results are filtered to memories scoped to that directory
     or global (no project_dir). When *recall_scope* is true, the recall-specific
     global-or-canonical-project predicate is applied before the result limit.
+
+    *top_k* of ``None`` omits the ``LIMIT`` clause entirely (unlike
+    :func:`search_vec`, FTS5 has no engine-level requirement for one — a
+    caller doing its own downstream filtering, e.g. a strict tags[] AND
+    filter, can ask for the whole matching set rather than risk a bound
+    truncating away the row that filter needs).
     """
     safe_query: str = _sanitize_fts_query(query)
     if not safe_query:
         return []
 
+    limit_clause: str = "\n            LIMIT ?" if top_k is not None else ""
+    limit_params: tuple[int, ...] = (top_k,) if top_k is not None else ()
+
     if recall_scope:
         _register_recall_fts_scope_function(conn)
         rows = conn.execute(
-            """\
+            f"""\
             SELECT m.id, fts.rank
             FROM memories_fts AS fts
             JOIN memories AS m ON m.rowid = fts.rowid
             WHERE memories_fts MATCH ?
               AND j5_recall_fts_scope_compatible(m.project_dir, ?) = 1
-            ORDER BY fts.rank
-            LIMIT ?
-            """,
-            (safe_query, project_dir, top_k),
+            ORDER BY fts.rank{limit_clause}
+            """,  # noqa: S608 — limit_clause is one of two fixed literals above
+            (safe_query, project_dir, *limit_params),
         ).fetchall()
     elif project_dir is not None:
         _register_read_scope_function(conn)
         rows = conn.execute(
-            """\
+            f"""\
             SELECT m.id, fts.rank
             FROM memories_fts AS fts
             JOIN memories AS m ON m.rowid = fts.rowid
             WHERE memories_fts MATCH ?
               AND j5_read_scope_compatible(m.project_dir, ?) = 1
-            ORDER BY fts.rank
-            LIMIT ?
-            """,
-            (safe_query, project_dir, top_k),
+            ORDER BY fts.rank{limit_clause}
+            """,  # noqa: S608
+            (safe_query, project_dir, *limit_params),
         ).fetchall()
     else:
         rows = conn.execute(
-            """\
+            f"""\
             SELECT m.id, fts.rank
             FROM memories_fts AS fts
             JOIN memories AS m ON m.rowid = fts.rowid
             WHERE memories_fts MATCH ?
-            ORDER BY fts.rank
-            LIMIT ?
-            """,
-            (safe_query, top_k),
+            ORDER BY fts.rank{limit_clause}
+            """,  # noqa: S608
+            (safe_query, *limit_params),
         ).fetchall()
     return [(row["id"], row["rank"]) for row in rows]
+
+
+def _tags_exact_predicate(tags: list[str]) -> tuple[str, list[str]]:
+    """Build an AND-chained exact-membership predicate for every tag in *tags*.
+
+    One ``EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`` per tag.
+    Tags are stored via ``json.dumps`` (``ensure_ascii=True``), so a ``LIKE``
+    over the raw text misses non-ASCII / quote / backslash tags (false
+    negatives) and ``LIKE``'s ``%``/``_`` wildcards and case-insensitivity
+    admit decoys that fill the KNN LIMIT before the strict filter runs
+    (bound-before-filter). ``json_each`` compares decoded, case-sensitive
+    values, so this equals the strict subset filter in ``retrieval/search.py``.
+    """
+    clauses: list[str] = []
+    params: list[str] = []
+    for tag in tags:
+        clauses.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)")
+        params.append(tag)
+    return " AND ".join(clauses), params
 
 
 def search_vec(
     conn: sqlite3.Connection,
     embedding: list[float],
     top_k: int = 50,
+    project_dir: str | None = None,
+    recall_scope: bool = False,
+    required_tags: list[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Vector similarity search via sqlite-vec.
 
@@ -305,17 +361,74 @@ def search_vec(
     Since all embeddings are L2-normalised, we convert to cosine distance
     via ``cosine_dist = L2² / 2`` so that downstream consumers get a
     consistent [0, 2] metric.
+
+    Scope (*project_dir* / *recall_scope*) and *required_tags* (exact,
+    case-sensitive membership via ``json_each``, identical to the strict
+    filter in ``retrieval/search.py``) are both applied as an ``id IN (subquery)`` pre-filter against *memories* — NOT a
+    ``JOIN``. vec0's KNN operator requires its ``LIMIT`` (or an explicit
+    ``k = ?``) to be visible to its own query planner; introducing a
+    ``JOIN`` between ``memories_vec`` and ``memories`` hides that from
+    vec0's ``xBestIndex`` and it refuses the query outright — confirmed
+    directly against the real extension (sqlite-vec 0.1.9):
+    ``OperationalError: A LIMIT or 'k = ?' constraint is required on vec0
+    knn queries``. ``id IN (SELECT id FROM memories WHERE ...)`` is, by
+    contrast, a constraint vec0 recognises directly against its own declared
+    ``id`` primary-key column (verified empirically: with an adversarial
+    corpus where every ineligible row is closer than every eligible one,
+    the eligible set still returns in full) — so it narrows the KNN
+    candidate set *before* nearest neighbours are computed, a genuine
+    pre-filter rather than a bound-then-filter. *top_k* only ever trims
+    within the already-eligible set, so it can stay at the caller's normal
+    pool size regardless of whether scope or tags apply — unlike
+    :func:`search_fts` / ``get_always_load``, there is no unbounded mode
+    here: vec0 rejects a KNN query with no bound at all, so when neither
+    scope nor tags apply, *top_k* is still the only constraint (matching
+    the original, always-worked shape exactly).
     """
-    rows = conn.execute(
-        """\
-        SELECT id, distance
-        FROM memories_vec
-        WHERE embedding MATCH ?
-        ORDER BY distance
-        LIMIT ?
-        """,
-        (json.dumps(embedding), top_k),
-    ).fetchall()
+    predicates: list[str] = []
+    params: list[object] = []
+
+    if recall_scope:
+        _register_recall_scope_function(conn)
+        predicates.append("j5_recall_scope_compatible(project_dir, ?) = 1")
+        params.append(project_dir)
+    elif project_dir is not None:
+        _register_read_scope_function(conn)
+        predicates.append("j5_read_scope_compatible(project_dir, ?) = 1")
+        params.append(project_dir)
+
+    if required_tags:
+        tag_sql, tag_params = _tags_exact_predicate(required_tags)
+        predicates.append(tag_sql)
+        params.extend(tag_params)
+
+    query_embedding: str = json.dumps(embedding)
+    if predicates:
+        where_clause: str = " AND ".join(predicates)
+        rows = conn.execute(
+            f"""\
+            SELECT id, distance
+            FROM memories_vec
+            WHERE embedding MATCH ?
+              AND id IN (SELECT id FROM memories WHERE {where_clause})
+            ORDER BY distance
+            LIMIT ?
+            """,  # noqa: S608 — where_clause is only ever built from the two
+            # fixed, parametrised fragments above; never from caller-supplied
+            # SQL text.
+            (query_embedding, *params, top_k),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """\
+            SELECT id, distance
+            FROM memories_vec
+            WHERE embedding MATCH ?
+            ORDER BY distance
+            LIMIT ?
+            """,
+            (query_embedding, top_k),
+        ).fetchall()
     return [
         (row["id"], _l2_to_cosine_distance(row["distance"]))
         for row in rows
@@ -325,28 +438,164 @@ def search_vec(
 # ── Retrieval helpers ────────────────────────────────────────────────────
 
 
+# Splitting the always-load set needs a SQL-side answer to "does this memory
+# claim a project of its own?". Asking the already-registered scope predicate
+# whether the record is compatible with the *global* scope answers exactly
+# that, and reuses the Python canonicalisation rules (NULL and blank alike are
+# unclaimed) rather than restating them in SQL where they could drift.
+_ALWAYS_LOAD_SCOPE_PREDICATES: dict[str, str] = {
+    "any": "",
+    "project": " AND j5_recall_scope_compatible(project_dir, NULL) = 0",
+    "global": " AND j5_recall_scope_compatible(project_dir, NULL) = 1",
+}
+
+
+def _always_load_page(
+    conn: sqlite3.Connection,
+    project_dir: str | None,
+    importance_threshold: float,
+    limit: int | None,
+    scope: str = "any",
+) -> list[str]:
+    """Return one ordered page of always-load ids, optionally scope-restricted.
+
+    Ordering is importance first, then creation order, then id, so that a
+    ``limit`` truncates the *least* useful end of the set rather than an
+    arbitrary one — ``ORDER BY importance DESC`` alone leaves thousands of
+    ties on a mature corpus. The tiebreak deliberately avoids
+    ``last_accessed``: every retrieval bumps it via ``update_access``, which
+    would couple this ordering to the very read-driven feedback loop the
+    bound exists to break — a memory that happened to be retrieved once
+    would leapfrog an equally-important, never-read memory on every
+    subsequent call, regardless of relative merit. ``created_at`` does not
+    change after insert, so it breaks importance ties without that feedback.
+    ``id`` is the final tiebreak for the (rare) case two rows share both —
+    ids are ULIDs, which sort monotonically with creation order, so this
+    stays a stable, fully deterministic ordering.
+    """
+    sql: str = f"""\
+        SELECT id FROM memories
+        WHERE importance >= ?
+          AND tier != 'archived'
+          AND j5_recall_scope_compatible(project_dir, ?) = 1
+          {_ALWAYS_LOAD_SCOPE_PREDICATES[scope]}
+        ORDER BY importance DESC, created_at DESC, id DESC
+        """  # noqa: S608 — interpolated fragment is a lookup in a fixed map
+    # This ORDER BY only owns which ids make it into the bounded page (SET
+    # stability) — a fixed, feedback-immune tiebreak so `limit` truncates the
+    # same members every time. It does NOT own the RANK those members end up
+    # at in a final recall/search result: recency is a first-class scorer
+    # term there by design (claude_memory.retrieval.scorer), so a member's
+    # position in the scored output legitimately moves as it is re-accessed.
+    # That rank oscillation is scorer-domain, not this page's contract.
+    params: list[object] = [importance_threshold, project_dir]
+    if limit is not None:
+        sql += "        LIMIT ?\n"
+        params.append(limit)
+    return [row["id"] for row in conn.execute(sql, params).fetchall()]
+
+
 def get_always_load(
     conn: sqlite3.Connection,
     project_dir: str | None,
     importance_threshold: float = 7.0,
+    limit: int | None = None,
 ) -> list[str]:
     """Return IDs of high-importance memories that should always be loaded.
 
     Selects memories whose importance meets the threshold *and* that either
     have no ``project_dir`` (global) or match the given *project_dir*.
+
+    Parameters
+    ----------
+    limit:
+        Maximum number of ids to return. ``None`` (the default) returns the
+        whole qualifying set, which is what diagnostics and direct callers
+        want. Retrieval callers should always pass a bound: on a mature corpus
+        the importance threshold alone qualifies the majority of the database,
+        at which point "always load" stops being a priority set and simply
+        floods the candidate pool (issue #29).
+
+        When a bound is set and the caller named a project, it is split
+        between that project's own memories and the global pool — half
+        reserved for each, with either side free to claim capacity the other
+        does not use. Without the reservation a project large enough to fill
+        the bound on its own would evict every global preference, and a small
+        project would see its own context evicted by globals.
     """
     _register_recall_scope_function(conn)
-    rows = conn.execute(
-        """\
-        SELECT id FROM memories
-        WHERE importance >= ?
+
+    if limit is None:
+        return _always_load_page(conn, project_dir, importance_threshold, None)
+    if limit <= 0:
+        return []
+
+    if canonicalize_project_dir(project_dir) is None:
+        # Only global memories are recall-compatible with an unscoped caller,
+        # so there is no second pool to reserve capacity for.
+        return _always_load_page(conn, project_dir, importance_threshold, limit)
+
+    scoped: list[str] = _always_load_page(
+        conn, project_dir, importance_threshold, limit, scope="project",
+    )
+    global_ids: list[str] = _always_load_page(
+        conn, project_dir, importance_threshold, limit, scope="global",
+    )
+
+    # Each pool is guaranteed its half and may grow into whatever the other
+    # pool leaves unclaimed.
+    reserved_for_project: int = limit // 2
+    take_scoped: int = min(
+        len(scoped), max(reserved_for_project, limit - len(global_ids)),
+    )
+    take_global: int = min(len(global_ids), limit - take_scoped)
+    return [*scoped[:take_scoped], *global_ids[:take_global]]
+
+
+_SESSION_STATE_TAGS: tuple[str, ...] = (
+    "session-state", "precompact", "kind:session-state",
+)
+
+
+def get_latest_session_state(
+    conn: sqlite3.Connection,
+    project_dir: str | None,
+    tags: tuple[str, ...] = _SESSION_STATE_TAGS,
+) -> sqlite3.Row | None:
+    """Return the newest non-archived session-state memory for *project_dir*.
+
+    Deliberate choices:
+
+    - Deterministic by authored time (exact UTC instant of ``created_at``,
+      ``id`` as tiebreak), independent of ranking, importance, tier or access.
+    - No importance floor.
+    - No global fallback: scope is a canonical exact match to a *scoped* row,
+      because a foreign resume block is worse than none.
+    - The tag set is wide because rows tagged only ``kind:session-state`` exist.
+    - Read-only: access stats feed the recency term this lookup exists to
+      bypass, so nothing is updated and nothing is committed.
+
+    Returns ``None`` for a blank *project_dir*, empty *tags*, or no match.
+    """
+    if project_dir is None or not project_dir.strip() or not tags:
+        return None
+    _register_recall_scope_function(conn)
+    _register_utc_microseconds_function(conn)
+    placeholders: str = ", ".join("?" for _ in tags)
+    return conn.execute(
+        f"""        SELECT id, content, type, tags, importance, created_at, project_dir
+        FROM memories
+        WHERE j5_recall_scope_compatible(project_dir, ?) = 1
+          AND j5_recall_scope_compatible(project_dir, NULL) = 0
           AND tier != 'archived'
-          AND j5_recall_scope_compatible(project_dir, ?) = 1
-        ORDER BY importance DESC
-        """,
-        (importance_threshold, project_dir),
-    ).fetchall()
-    return [row["id"] for row in rows]
+          AND EXISTS (
+            SELECT 1 FROM json_each(memories.tags) WHERE value IN ({placeholders})
+          )
+        ORDER BY j5_utc_microseconds(created_at) DESC, id DESC
+        LIMIT 1
+        """,  # noqa: S608 — placeholders is only ever "?, ?, ..."; values are bound.
+        (project_dir, *tags),
+    ).fetchone()
 
 
 def update_access(conn: sqlite3.Connection, ids: str | list[str]) -> None:

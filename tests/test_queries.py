@@ -331,6 +331,270 @@ class TestGetAlwaysLoad:
             assert record is not None
             assert record.project_dir is None
 
+    # -- Bounding (issue #29) ------------------------------------------------
+    #
+    # Without a LIMIT the importance threshold alone qualifies the majority of
+    # a mature corpus (measured: 1,811 of 2,909 live memories), at which point
+    # "always load" stops being a priority set and simply floods the candidate
+    # pool. These tests pin the bound and the project/global split that keeps
+    # it fair.
+
+    def _seed_growing_corpus(
+        self,
+        conn: sqlite3.Connection,
+        encoder: MockEncoder,
+        count: int,
+        project_dir: str | None = None,
+        prefix: str = "grow",
+    ) -> None:
+        """Insert *count* memories that all clear the always-load threshold.
+
+        Commits before returning: an open write transaction plus a cached
+        SELECT makes SQLite refuse the ``create_function`` call that every
+        scope-aware query performs (issue #31), so an uncommitted seed would
+        fail the *next* read rather than this one.
+        """
+        for i in range(count):
+            record = _make_record(
+                id=f"{prefix}-{i:04d}",
+                content=f"High-importance memory number {i}",
+                importance=7.0 + (i % 30) / 10.0,
+                project_dir=project_dir,
+            )
+            insert_memory(conn, record, encoder.encode(record.content))
+        conn.commit()
+
+    def test_unbounded_by_default(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Omitting *limit* keeps the pre-existing return-everything contract."""
+        self._seed_growing_corpus(db_conn, mock_encoder, 40)
+
+        assert len(get_always_load(db_conn, project_dir=None)) == 40
+
+    def test_stays_bounded_as_corpus_grows(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """The bounded set must not grow with the corpus — the issue-#29 defect.
+
+        Every seeded memory qualifies as always-load, so an unbounded query
+        would return 50, then 150, then 300.
+        """
+        sizes: list[int] = []
+        for _ in range(3):
+            self._seed_growing_corpus(
+                db_conn, mock_encoder, 50, prefix=f"batch{len(sizes)}",
+            )
+            sizes.append(len(get_always_load(db_conn, project_dir=None, limit=45)))
+
+        assert sizes == [45, 45, 45]
+
+    def test_limit_returns_the_most_important_first(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """A bound must truncate the weakest end, not an arbitrary one."""
+        for i in range(20):
+            record = _make_record(
+                id=f"imp-{i:02d}",
+                content=f"Memory {i}",
+                importance=7.0 + i / 10.0,
+            )
+            insert_memory(db_conn, record, mock_encoder.encode(record.content))
+
+        ids: list[str] = get_always_load(db_conn, project_dir=None, limit=5)
+
+        assert ids == ["imp-19", "imp-18", "imp-17", "imp-16", "imp-15"]
+
+    def test_non_positive_limit_returns_nothing(
+        self,
+        db_conn: sqlite3.Connection,
+        sample_memories: list[MemoryRecord],
+    ) -> None:
+        assert get_always_load(db_conn, project_dir=None, limit=0) == []
+
+    def test_large_project_cannot_evict_every_global(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Half the bound is reserved for globals when the project is huge.
+
+        Mirrors the measured shape of the live corpus, where one project owns
+        1,297 always-load memories against 67 globals — deliberately
+        asymmetric, unlike a matched-size split. With equal-sized pools any
+        reasonable ranking (including one with the reservation split simply
+        deleted) happens to divide the bound evenly, so a symmetric seed
+        can't tell a real fairness guarantee apart from a coincidence of
+        matching pool sizes. Here the project alone is large enough to fill
+        the entire bound on its own — only an explicit reservation floor
+        leaves room for any global at all.
+        """
+        self._seed_growing_corpus(
+            db_conn, mock_encoder, 100, project_dir="/projects/big", prefix="proj",
+        )
+        self._seed_growing_corpus(db_conn, mock_encoder, 5, prefix="glob")
+
+        ids: list[str] = get_always_load(
+            db_conn, project_dir="/projects/big", limit=30,
+        )
+        scoped = [i for i in ids if i.startswith("proj-")]
+        globals_ = [i for i in ids if i.startswith("glob-")]
+
+        assert len(ids) == 30
+        # All 5 globals survive despite the project pool alone being able to
+        # fill the entire bound — this is the reservation floor at work, not
+        # a coincidence of pool sizes.
+        assert len(globals_) == 5
+        assert len(scoped) == 25
+
+    def test_small_project_keeps_all_of_its_own_memories(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """A project below its reservation gives the slack back to globals.
+
+        The reverse crowd-out: a handful of project memories must survive a
+        bound they could never fill, and must not leave the rest unused.
+        """
+        self._seed_growing_corpus(
+            db_conn, mock_encoder, 3, project_dir="/projects/small", prefix="proj",
+        )
+        self._seed_growing_corpus(db_conn, mock_encoder, 100, prefix="glob")
+
+        ids: list[str] = get_always_load(
+            db_conn, project_dir="/projects/small", limit=30,
+        )
+
+        assert len([i for i in ids if i.startswith("proj-")]) == 3
+        assert len(ids) == 30
+
+    def test_bounded_set_still_excludes_archived_and_foreign_scopes(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Bounding must not weaken the tier or scope guarantees."""
+        for record in (
+            _make_record(id="archived", importance=10.0, tier="archived"),
+            _make_record(id="foreign", importance=10.0, project_dir="/projects/other"),
+            _make_record(id="mine", importance=9.0, project_dir="/projects/mine"),
+            _make_record(id="global", importance=9.0),
+        ):
+            insert_memory(db_conn, record, mock_encoder.encode(record.content))
+
+        ids: list[str] = get_always_load(
+            db_conn, project_dir="/projects/mine", limit=10,
+        )
+
+        assert sorted(ids) == ["global", "mine"]
+
+    # -- Tiebreak stability (must not couple to the read feedback loop) -----
+    #
+    # _update_access_stats bumps last_accessed on every retrieval. Ordering
+    # the bounded page by last_accessed as a tiebreaker would make ranking
+    # depend on which memories happened to be read recently — exactly the
+    # feedback loop this bounded page exists to break. created_at (which
+    # never changes after insert) and, as a final tiebreak, id (ULIDs sort
+    # monotonically with creation order) replace it.
+
+    def test_tiebreak_is_not_perturbed_by_access_feedback(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Reading a memory must not change its place in a tied ordering."""
+        earlier = _make_record(id="earlier", importance=8.0)
+        insert_memory(db_conn, earlier, mock_encoder.encode(earlier.content))
+        later = _make_record(id="later", importance=8.0)
+        insert_memory(db_conn, later, mock_encoder.encode(later.content))
+        # Commit before the first scope-aware read: an open write transaction
+        # plus a cached SELECT makes SQLite refuse create_function (issue #31).
+        db_conn.commit()
+
+        before: list[str] = get_always_load(db_conn, project_dir=None, limit=2)
+        assert before == ["later", "earlier"]
+
+        # Simulate "earlier" being retrieved repeatedly — the read-driven
+        # signal the tiebreak must not respond to.
+        for _ in range(3):
+            update_access(db_conn, "earlier")
+        db_conn.commit()
+
+        after: list[str] = get_always_load(db_conn, project_dir=None, limit=2)
+        assert after == before
+
+    def test_id_is_final_tiebreak_when_created_at_also_ties(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """Two rows tied on both importance and created_at fall back to id."""
+        tied_created_at: str = "2026-01-01T00:00:00+00:00"
+        for record_id in ("aaa-001", "zzz-002"):
+            record = MemoryRecord(
+                id=record_id,
+                content=f"Content for {record_id}",
+                summary=None,
+                type="lesson",
+                tags=[],
+                created_at=tied_created_at,
+                updated_at=tied_created_at,
+                last_accessed=tied_created_at,
+                access_count=0,
+                importance=8.0,
+                tier="hot",
+                project_dir=None,
+                source_session=None,
+                supersedes=None,
+                consolidated_from=[],
+                metadata={},
+            )
+            insert_memory(db_conn, record, mock_encoder.encode(record.content))
+
+        ids: list[str] = get_always_load(db_conn, project_dir=None, limit=2)
+
+        assert ids == ["zzz-002", "aaa-001"]
+
+    def test_membership_is_stable_across_access_updating_recalls(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_encoder: MockEncoder,
+    ) -> None:
+        """The bounded page's ID SET must not drift as its members get read.
+
+        This fix owns SET-stability of the always-load truncation — three
+        successive recalls, each bumping ``last_accessed`` for whatever the
+        prior call returned (exactly what a real retrieval does), must keep
+        selecting the same members. It does NOT own RANK-stability of a
+        final scored/reranked result: recency is a deliberate scorer term
+        there, so a member's position in that output is expected to move —
+        that is scorer-domain (claude_memory.retrieval.scorer), not this
+        page's contract, and is not asserted here.
+        """
+        for i in range(6):
+            record = _make_record(id=f"tied-{i:02d}", importance=8.0)
+            insert_memory(db_conn, record, mock_encoder.encode(record.content))
+        db_conn.commit()
+
+        page_1: set[str] = set(get_always_load(db_conn, project_dir=None, limit=3))
+        update_access(db_conn, list(page_1))
+        db_conn.commit()
+
+        page_2: set[str] = set(get_always_load(db_conn, project_dir=None, limit=3))
+        update_access(db_conn, list(page_2))
+        db_conn.commit()
+
+        page_3: set[str] = set(get_always_load(db_conn, project_dir=None, limit=3))
+
+        assert page_1 == page_2 == page_3
+
 
 # ---------------------------------------------------------------------------
 # update_access
