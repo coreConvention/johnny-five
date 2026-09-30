@@ -282,7 +282,9 @@ class TestReconciliationIntegration:
 
         monkeypatch.setattr(
             "claude_memory.retrieval.search.search_vec",
-            lambda c, emb, top_k=50: brute_force_vec_search(c, emb, top_k),
+            lambda c, emb, top_k=50, project_dir=None, recall_scope=False, required_tags=None: (
+                brute_force_vec_search(c, emb, top_k)
+            ),
         )
         _insert(db_conn, "old", "zzqtoken deploy target east", _SAME, OLD_TS)
         _insert(db_conn, "new", "zzqtoken deploy target west", _SAME, NEW_TS)

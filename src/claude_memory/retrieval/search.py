@@ -57,6 +57,14 @@ class SearchResult:
     lexical_score: float = 0.0
 
 
+# How much wider than *top_k* each candidate pool is drawn before scoring.
+# Retrieval is a funnel: over-fetch from every backend, then let the
+# multi-signal scorer pick the winners. This applies uniformly to the vector
+# pool, the FTS pool, and (since issue #29) the always-load pool, so no single
+# source can outnumber the others by orders of magnitude.
+_CANDIDATE_POOL_MULTIPLIER: int = 3
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -377,13 +385,36 @@ def search_memories(
     query_embedding: list[float] = encoder.encode(query)
 
     # 2. Search — SQLite is single-writer, so sequential is fine.
+    #
+    # A strict tags[] filter (step 4.5) only narrows the eventual result set.
+    # Capping a pool before that filter runs can silently evict the only
+    # candidate carrying a required tag — a false negative the caller has no
+    # way to detect, since the response looks identical to "no matches
+    # exist". The three sources close that gap differently:
+    #   - search_vec takes required_tags directly and applies it as a true
+    #     id-eligibility pre-filter inside its own SQL, as an exact
+    #     case-sensitive json_each membership test equal to the strict
+    #     filter (see search_vec's
+    #     docstring), so its LIMIT is always safe to leave at the normal
+    #     pool size — there is no global-then-filter step left to starve.
+    #   - search_fts and get_always_load have no SQL-level tag predicate, so
+    #     when tags are supplied their pools go genuinely unbounded (no
+    #     LIMIT at all) instead of capped-then-filtered — get_always_load
+    #     already had this mode (`limit=None`, issue #29); search_fts's
+    #     `top_k=None` mirrors it.
+    pool_top_k: int = top_k * _CANDIDATE_POOL_MULTIPLIER
+    unbounded_limit: int | None = None if tags else pool_top_k
+
     vec_results: list[tuple[str, float]] = search_vec(
-        conn, query_embedding, top_k=top_k * 3,
+        conn, query_embedding, top_k=pool_top_k,
+        project_dir=project_dir, required_tags=tags,
     )
     fts_results: list[tuple[str, float]] = search_fts(
-        conn, query, project_dir=project_dir, top_k=top_k * 3,
+        conn, query, project_dir=project_dir, top_k=unbounded_limit,
     )
-    always_load_ids: list[str] = get_always_load(conn, project_dir=project_dir)
+    always_load_ids: list[str] = get_always_load(
+        conn, project_dir=project_dir, limit=unbounded_limit,
+    )
 
     # 3. Merge
     candidates: list[RetrievalCandidate] = merge_candidates(
@@ -478,13 +509,14 @@ def recall_session_memories(
         Up to *top_k* results sorted by descending composite score.
     """
     # --- Always-load memories (unconditional) --------------------------------
-    always_load_ids: list[str] = get_always_load(conn, project_dir=project_dir)
-
-    # Build baseline candidates from always-load set.
-    always_candidates: list[RetrievalCandidate] = [
-        RetrievalCandidate(memory_id=mid, is_always_load=True)
-        for mid in always_load_ids
-    ]
+    # Bounded to the same pool size as the vector and FTS candidate lists so a
+    # mature corpus cannot turn "always load" into "load most of the database"
+    # (issue #29).
+    always_load_ids: list[str] = get_always_load(
+        conn,
+        project_dir=project_dir,
+        limit=top_k * _CANDIDATE_POOL_MULTIPLIER,
+    )
 
     # --- Semantic search (optional) ------------------------------------------
     semantic_candidates: list[RetrievalCandidate] = []
@@ -492,23 +524,34 @@ def recall_session_memories(
         query_embedding: list[float] = encoder.encode(initial_context)
 
         vec_results: list[tuple[str, float]] = search_vec(
-            conn, query_embedding, top_k=top_k * 3,
+            conn, query_embedding, top_k=top_k * _CANDIDATE_POOL_MULTIPLIER,
+            project_dir=project_dir, recall_scope=True,
         )
         fts_results: list[tuple[str, float]] = search_fts(
             conn,
             initial_context,
             project_dir=project_dir,
-            top_k=top_k * 3,
+            top_k=top_k * _CANDIDATE_POOL_MULTIPLIER,
             recall_scope=True,
         )
 
         semantic_candidates = merge_candidates(vec_results, fts_results, [])
 
     # --- Merge both pools, deduplicating by id --------------------------------
+    # Always-load membership travels on the ``is_always_load`` flag; it is not
+    # a similarity claim. An earlier revision re-encoded the always-load set as
+    # vector hits at a synthetic distance of 0.0, which handed every member the
+    # full ``alpha`` weight regardless of relevance, and it forwarded only the
+    # FTS half of the semantic pool, discarding candidates that vector search
+    # alone had found. Between them that made the semantic signal binary and
+    # left lexical overlap as the only query-sensitive term (issue #28).
+    # Forward both real signals instead and let the scorer weigh them.
     all_candidates: list[RetrievalCandidate] = merge_candidates(
-        # Re-encode always-load as vec_results with distance=0 (max similarity)
-        # so they get the highest possible semantic score.
-        vec_results=[(c.memory_id, 0.0) for c in always_candidates],
+        vec_results=[
+            (c.memory_id, c.vec_distance)
+            for c in semantic_candidates
+            if c.vec_distance is not None
+        ],
         fts_results=[
             (c.memory_id, c.fts_rank)
             for c in semantic_candidates
@@ -516,24 +559,6 @@ def recall_session_memories(
         ],
         always_load_ids=always_load_ids,
     )
-
-    # Fold in vec_distance from semantic candidates (merge_candidates above
-    # set vec_distance=0.0 for always-load; overwrite only if semantic gave
-    # a *closer* distance for a candidate that is also always-load).
-    sem_map: dict[str, RetrievalCandidate] = {
-        c.memory_id: c for c in semantic_candidates
-    }
-    for candidate in all_candidates:
-        sem = sem_map.get(candidate.memory_id)
-        if sem is not None and sem.vec_distance is not None:
-            # For always-load items, keep the better (lower) distance.
-            if candidate.is_always_load:
-                candidate.vec_distance = min(
-                    candidate.vec_distance or 0.0,
-                    sem.vec_distance,
-                )
-            else:
-                candidate.vec_distance = sem.vec_distance
 
     # --- Lookup, score, return ------------------------------------------------
     all_ids: list[str] = [c.memory_id for c in all_candidates]

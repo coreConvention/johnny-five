@@ -392,6 +392,8 @@ Scoped to `project_dir=/projects/your-app`. 12 memories loaded.
 ## User preferences / feedback
 - Brief output preferred; no restatement of what just happened.
 ```
+The Last session-state section comes from a direct lookup of the project's newest session-state memory (by creation time, independent of ranking), and it prints an explicit line when none exists or when the server predates the lookup.
+
 Claude reads this and can continue the task without asking what's going on.
 
 ### When to `memory_store` manually
