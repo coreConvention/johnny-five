@@ -20,6 +20,7 @@ from claude_memory.db.queries import (
     insert_memory,
 )
 from claude_memory.lifecycle.dedup import (
+    _MERGE_MARKER,
     DedupResult,
     _merge_content,
     store_with_dedup,
@@ -74,28 +75,46 @@ def _make_and_insert(
 
 
 class TestMergeContent:
-    """Content merge strategies for short and long content."""
+    """Containment checks and the size bound on merged content (issue #45)."""
 
-    def test_short_content_concatenated(self) -> None:
-        """Content < 500 chars should be concatenated with a separator."""
-        result: str = _merge_content("Hello world", "New info")
-        assert "Hello world" in result
-        assert "New info" in result
-        assert "---" in result
+    def test_new_text_appended_after_marker(self) -> None:
+        result: str = _merge_content("Hello world", "New info", max_chars=4000)
+        assert result == f"Hello world{_MERGE_MARKER}New info"
 
-    def test_long_content_uses_also_prefix(self) -> None:
-        """Content >= 500 chars should use 'Also:' addendum."""
-        long_existing: str = "x" * 500
-        result: str = _merge_content(long_existing, "New info")
-        assert result.startswith(long_existing)
-        assert "Also: New info" in result
-        assert "---" not in result
+    def test_identical_text_leaves_record_unchanged(self) -> None:
+        assert _merge_content("Hello world", "Hello world", max_chars=4000) == "Hello world"
 
-    def test_exactly_500_uses_also(self) -> None:
-        """Content of exactly 500 chars should use 'Also:' (>= 500 check is < 500)."""
-        existing: str = "a" * 500
-        result: str = _merge_content(existing, "addition")
-        assert "Also: addition" in result
+    def test_contained_text_leaves_record_unchanged(self) -> None:
+        """A substring, even with different whitespace, adds nothing."""
+        existing: str = f"The user prefers dark mode.{_MERGE_MARKER}Also in the terminal."
+        assert _merge_content(existing, "prefers  dark\nmode", max_chars=4000) == existing
+        assert _merge_content(existing, "Also in the terminal.", max_chars=4000) == existing
+
+    def test_text_containing_the_record_replaces_it(self) -> None:
+        """A cumulative note that restates the record must not repeat it."""
+        result: str = _merge_content(
+            "Step one done.", "Step one done. Step two done.", max_chars=4000
+        )
+        assert result == "Step one done. Step two done."
+
+    def test_oldest_additions_dropped_past_limit(self) -> None:
+        existing: str = _MERGE_MARKER.join(["FIRST", "a" * 40, "b" * 40, "c" * 40])
+        limit: int = len("FIRST") + 2 * (len(_MERGE_MARKER) + 40) + len(_MERGE_MARKER) + 3
+        result: str = _merge_content(existing, "new", max_chars=limit)
+        assert result == _MERGE_MARKER.join(["FIRST", "b" * 40, "c" * 40, "new"])
+        assert len(result) <= limit
+
+    def test_newest_addition_kept_when_first_version_exceeds_limit(self) -> None:
+        existing: str = _MERGE_MARKER.join(["F" * 100, "old addition"])
+        result: str = _merge_content(existing, "newest", max_chars=50)
+        assert result == _MERGE_MARKER.join(["F" * 100, "newest"])
+
+    def test_markdown_rule_in_first_version_is_never_trimmed(self) -> None:
+        """Only the merge marker splits additions; a plain '---' is content."""
+        first: str = "Section one\n\n---\n\nSection two"
+        existing: str = f"{first}{_MERGE_MARKER}old addition"
+        result: str = _merge_content(existing, "newest", max_chars=10)
+        assert result == f"{first}{_MERGE_MARKER}newest"
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +369,74 @@ class TestStoreMergesDuplicate:
 
         assert result.action == "inserted"
         assert result.merged_with is None
+
+
+class TestStoreStaysBounded:
+    """A recurring store must not grow its record without limit (issue #45)."""
+
+    STORES: int = 25
+
+    def test_same_content_stored_n_times_leaves_record_unchanged(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        content: str = "Weekly health note: all services green."
+        _make_and_insert(db_conn, mock_encoder, id="weekly-001", content=content)
+        embedding_before = db_conn.execute(
+            "SELECT embedding FROM memories_vec WHERE id = ?", ("weekly-001",)
+        ).fetchone()[0]
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("weekly-001", 0.0)],
+        ):
+            for _ in range(self.STORES):
+                result: DedupResult = store_with_dedup(
+                    conn=db_conn,
+                    encoder=mock_encoder,
+                    content=content,
+                    type="user",
+                    tags=["weekly"],
+                )
+                assert result.action == "merged"
+
+        fetched: MemoryRecord | None = get_memory(db_conn, "weekly-001")
+        assert fetched is not None
+        assert fetched.content == content
+        assert fetched.importance == pytest.approx(5.0)
+        assert fetched.tags == ["weekly"]
+        embedding_after = db_conn.execute(
+            "SELECT embedding FROM memories_vec WHERE id = ?", ("weekly-001",)
+        ).fetchone()[0]
+        assert embedding_after == embedding_before
+
+    def test_changing_near_duplicates_stay_within_limit(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        first: str = "Weekly summary."
+        limit: int = 300
+        _make_and_insert(db_conn, mock_encoder, id="summary-001", content=first)
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("summary-001", 0.05)],
+        ):
+            for week in range(self.STORES):
+                store_with_dedup(
+                    conn=db_conn,
+                    encoder=mock_encoder,
+                    content=f"Week {week}: {week * 7} tickets closed.",
+                    type="user",
+                    merge_max_chars=limit,
+                )
+                fetched: MemoryRecord | None = get_memory(db_conn, "summary-001")
+                assert fetched is not None
+                assert len(fetched.content) <= limit
+
+        last_week: int = self.STORES - 1
+        assert fetched.content.startswith(first)
+        assert fetched.content.endswith(f"Week {last_week}: {last_week * 7} tickets closed.")
+        assert "Week 0:" not in fetched.content
+        assert fetched.importance == pytest.approx(10.0)
 
 
 class TestStoreProjectIsolation:

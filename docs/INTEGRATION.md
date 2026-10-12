@@ -270,6 +270,7 @@ All scoring weights are `MEMORY_*` env vars. The defaults below are sensible for
 | `MEMORY_RECENCY_DECAY` | `0.01` | Retrieval-time recency half-life. Default `0.01` ≈ 69-day half-life. | `0.002` (~1-year half-life) for long retention. `0.0` disables recency decay entirely. |
 | `MEMORY_DECAY_RATE` | `0.995` | Daily importance-decay multiplier (aging cycle, not retrieval) | `0.9995` for slow years-scale decay. `1.0` disables. |
 | `MEMORY_DEDUP_THRESHOLD` | `0.15` | Cosine distance under which a new memory merges into a duplicate | Lower (0.08) for aggressive dedup; higher (0.25) to keep near-duplicates separate. |
+| `MEMORY_MERGE_MAX_CHARS` | `4000` | Size limit for a memory that near-duplicate stores merge into. Past it the oldest merged additions are dropped; the first version and the newest addition are always kept. | Higher if merged memories lose detail you want; lower to keep recurring writers' memories short. |
 | `MEMORY_WARM_DAYS` | `30` | Days of inactivity before a memory demotes to warm | Shorter (14) if your DB grows fast. `180` for multi-month active window. |
 | `MEMORY_COLD_DAYS` | `180` | Warm → cold | Shorter (90) for aggressive consolidation. `730` for multi-year retention. |
 | `MEMORY_COLD_IMPORTANCE_THRESHOLD` | `3.0` | Max importance for cold demotion | Lower (`1.0`) to protect more memories from cold. |

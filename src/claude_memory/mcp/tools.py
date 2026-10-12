@@ -260,6 +260,7 @@ async def tool_memory_store(
             source_session=source_session,
             metadata=metadata,
             dedup_threshold=settings.dedup_threshold,
+            merge_max_chars=settings.merge_max_chars,
         )
         conn.commit()
         return {
