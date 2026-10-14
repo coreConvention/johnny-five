@@ -18,6 +18,7 @@ from claude_memory.db.queries import (
     MemoryRecord,
     get_memory,
     insert_memory,
+    update_memory,
 )
 from claude_memory.lifecycle.dedup import (
     DedupResult,
@@ -596,3 +597,60 @@ class TestStoreProjectIsolation:
         assert result.action == "merged"
         assert result.memory_id == "same-001"
         assert [call.kwargs["top_k"] for call in search_mock.call_args_list] == [5, 10]
+
+
+# ---------------------------------------------------------------------------
+# store_with_dedup — archived rows (issue #48)
+# ---------------------------------------------------------------------------
+
+
+class TestStoreSkipsArchived:
+    """A near-duplicate store must not merge into, and so revive, an archived row."""
+
+    def test_archived_duplicate_stays_archived_and_new_row_inserted(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(db_conn, mock_encoder, id="gone-001", content="Forgotten note")
+        update_memory(db_conn, "gone-001", tier="archived")
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("gone-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Forgotten note, restated",
+                type="user",
+            )
+
+        gone = get_memory(db_conn, "gone-001")
+        assert result.action == "inserted"
+        assert result.memory_id != "gone-001"
+        assert gone is not None
+        assert gone.tier == "archived"
+        assert gone.content == "Forgotten note"
+
+    def test_skips_archived_candidate_and_merges_later_live_one(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(db_conn, mock_encoder, id="gone-001", content="Old source")
+        update_memory(db_conn, "gone-001", tier="archived")
+        _make_and_insert(db_conn, mock_encoder, id="live-001", content="Consolidated note")
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("gone-001", 0.01), ("live-001", 0.02)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Consolidated note, restated",
+                type="user",
+            )
+
+        assert result.action == "merged"
+        assert result.memory_id == "live-001"
+        gone = get_memory(db_conn, "gone-001")
+        assert gone is not None
+        assert gone.tier == "archived"

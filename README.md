@@ -285,6 +285,8 @@ hot  →  warm  →  cold  →  archived
 
 When storing a memory, the system checks for near-duplicates (cosine distance < 0.15). If found, it merges the new content into the existing memory, bumps importance, re-embeds, and returns `"action": "merged"` instead of `"inserted"`.
 
+Archived memories are never merge targets, so a forgotten or superseded memory stays archived.
+
 ## Benchmarks
 
 johnny-five's retrieval pipeline is measured against three published memory benchmarks using the same datasets and methodology mempalace reports their numbers on. Full methodology, per-category breakdowns, and reproducibility commands live in [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md).

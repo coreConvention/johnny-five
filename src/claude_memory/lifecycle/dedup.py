@@ -52,7 +52,11 @@ def _find_near_duplicate(
     project_dir: str | None,
     dedup_threshold: float,
 ) -> MemoryRecord | None:
-    """Find the nearest compatible duplicate without foreign-candidate starvation."""
+    """Find the nearest live, compatible duplicate without foreign-candidate starvation.
+
+    Archived rows never match: the merge sets ``tier="hot"``, so merging into
+    one would bring a forgotten or superseded memory back (issue #48).
+    """
     candidate_limit: int = 5
     while True:
         candidates: list[tuple[str, float]] = search_vec(
@@ -66,7 +70,7 @@ def _find_near_duplicate(
                 return None
 
             existing: MemoryRecord | None = get_memory(conn, candidate_id)
-            if existing is None:
+            if existing is None or existing.tier == "archived":
                 continue
             if is_exact_scope_match(existing.project_dir, project_dir):
                 return existing
@@ -74,8 +78,9 @@ def _find_near_duplicate(
         if len(candidates) < candidate_limit:
             return None
 
-        # All returned candidates were near-duplicates in incompatible scopes.
-        # Expand until the ordered result set reaches the threshold or is exhausted.
+        # All returned candidates were near-duplicates that cannot match
+        # (archived, or in an incompatible scope). Expand until the ordered
+        # result set reaches the threshold or is exhausted.
         candidate_limit *= 2
 
 
