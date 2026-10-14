@@ -283,7 +283,11 @@ hot  →  warm  →  cold  →  archived
 
 ### Dedup on Write
 
-When storing a memory, the system checks for near-duplicates (cosine distance < 0.15). If found, it merges the new content into the existing memory, bumps importance, re-embeds, and returns `"action": "merged"` instead of `"inserted"`.
+When storing a memory, the system checks for near-duplicates (cosine distance < 0.15). If found, it merges the new content into the existing memory and returns `"action": "merged"` instead of `"inserted"`:
+
+- Text the memory already contains (identical, or a substring) leaves it unchanged; only tags and metadata merge.
+- Text that contains the whole memory replaces it rather than repeating it.
+- Anything else is appended after a `--- merged update ---` marker, importance is bumped by 1, and the memory is re-embedded. Past `MEMORY_MERGE_MAX_CHARS` (default 4000), the oldest merged additions are dropped; the first version and the newest addition are always kept, so a recurring store cannot grow one memory without limit.
 
 Archived memories are never merge targets, so a forgotten or superseded memory stays archived. Session-state snapshots (tagged `session-state`, `precompact` or `kind:session-state`) are never merged: a snapshot close to an earlier snapshot is inserted as a new memory that supersedes it, the earlier one is archived, and the call returns `"action": "replaced"` with the archived id in `superseded`. Snapshots and other memories are never merge targets for each other. The session-start resume shows the newest snapshot by creation time, which a merge would leave at the first snapshot's time.
 
@@ -385,6 +389,7 @@ All settings are configurable via `MEMORY_*` environment variables:
 | `MEMORY_EMBEDDING_DIM` | `384` | Vector dimensionality (must match model) |
 | `MEMORY_TOP_K` | `15` | Default search result count |
 | `MEMORY_DEDUP_THRESHOLD` | `0.15` | Cosine distance for near-duplicate detection |
+| `MEMORY_MERGE_MAX_CHARS` | `4000` | Size limit for a merged memory; past it the oldest merged additions are dropped |
 | `MEMORY_ALPHA` | `0.45` | Semantic similarity weight |
 | `MEMORY_BETA` | `0.20` | Recency weight |
 | `MEMORY_GAMMA` | `0.10` | Frequency weight |

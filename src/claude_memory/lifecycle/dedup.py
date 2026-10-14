@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,16 +43,52 @@ def _is_session_state(tags: list[str]) -> bool:
     return any(tag in SESSION_STATE_TAGS for tag in tags)
 
 
-def _merge_content(existing: str, new: str) -> str:
-    """Merge *new* content into *existing*, keeping the result readable.
+# Separates a record's first version from text later merged into it. It is
+# distinctive on purpose: a bare "---" is also a markdown rule inside stored
+# text, and trimming must never mistake part of the first version for an old
+# addition. Records merged before this marker existed (with "---" or "Also:")
+# hold no marker, so their whole text counts as the first version and is kept.
+_MERGE_MARKER: str = "\n\n--- merged update ---\n\n"
 
-    If the existing content is short (< 500 chars) we simply concatenate
-    with a visual separator.  For longer existing content we append a
-    brief "Also:" addendum so the main body stays compact.
+_WHITESPACE: re.Pattern[str] = re.compile(r"\s+")
+
+
+def _normalize(text: str) -> str:
+    """Collapse whitespace so containment ignores formatting-only differences."""
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _merge_content(existing: str, new: str, max_chars: int) -> str:
+    """Merge *new* content into *existing*, keeping the result bounded.
+
+    - *new* already contained in *existing* (identical or a substring): the
+      record is returned unchanged, so a recurring identical store is a no-op.
+    - *existing* contained in *new*: *new* already says everything the record
+      did, so it replaces it instead of repeating it.
+    - Otherwise *new* is appended after :data:`_MERGE_MARKER`. The first version
+      is always kept and the newest addition always survives; earlier additions
+      are dropped oldest-first once the total would exceed *max_chars*.
+
+    The result is at most ``max(max_chars, len(first version) +
+    len(_MERGE_MARKER) + len(new))`` characters, however many merges happen.
     """
-    if len(existing) < 500:
-        return f"{existing}\n\n---\n\n{new}"
-    return f"{existing}\n\nAlso: {new}"
+    normalized_existing: str = _normalize(existing)
+    normalized_new: str = _normalize(new)
+    if normalized_new in normalized_existing:
+        return existing
+    if normalized_existing in normalized_new:
+        return new
+
+    first, *additions = existing.split(_MERGE_MARKER)
+    kept: list[str] = [new]
+    budget: int = max_chars - len(first) - len(_MERGE_MARKER) - len(new)
+    for addition in reversed(additions):
+        cost: int = len(_MERGE_MARKER) + len(addition)
+        if cost > budget:
+            break
+        kept.insert(0, addition)
+        budget -= cost
+    return _MERGE_MARKER.join([first, *kept])
 
 
 def _find_near_duplicate(
@@ -118,6 +155,7 @@ def store_with_dedup(
     source_session: str | None = None,
     metadata: dict | None = None,
     dedup_threshold: float = 0.15,
+    merge_max_chars: int = 4000,
 ) -> DedupResult:
     """Store a memory with near-duplicate detection.
 
@@ -128,8 +166,11 @@ def store_with_dedup(
        distance is below *dedup_threshold*, among live rows of the same kind
        (session-state snapshot or not; see :func:`_find_near_duplicate`).
     3. **If a duplicate is found** — merge the new content into the
-       existing memory, bump importance by 1.0 (capped at 10.0),
-       re-embed the merged text, and update the record in-place.
+       existing memory (see :func:`_merge_content`), union its tags and
+       metadata, and update the record in-place.  Only when the merge
+       changed the text is importance bumped by 1.0 (capped at 10.0) and
+       the merged text re-embedded; text the record already contains
+       leaves both untouched.
        A session-state snapshot is never merged: it is inserted as a fresh
        record that supersedes the earlier snapshot, which is archived.  The
        resume shows the newest snapshot by ``created_at``, and a merge would
@@ -162,6 +203,10 @@ def store_with_dedup(
     dedup_threshold:
         Maximum cosine distance (1 − similarity) to consider two
         memories as near-duplicates.  Lower values are stricter.
+    merge_max_chars:
+        Size limit for a merged record.  Past it, the oldest merged
+        additions are dropped; the first version and the newest addition
+        are always kept.
 
     Returns
     -------
@@ -183,9 +228,8 @@ def store_with_dedup(
 
     if existing is not None and not snapshot:
         # -- Merge into existing record ------------------------------------
-        merged_content: str = _merge_content(existing.content, content)
-        merged_importance: float = min(existing.importance + 1.0, 10.0)
-        merged_embedding: list[float] = encoder.encode(merged_content)
+        merged_content: str = _merge_content(existing.content, content, merge_max_chars)
+        content_changed: bool = merged_content != existing.content
 
         now: str = datetime.now(timezone.utc).isoformat()
 
@@ -202,20 +246,25 @@ def store_with_dedup(
         )
         merged_meta: dict = {**existing_meta, **(metadata or {})}
 
-        update_memory(
-            conn,
-            existing.id,
-            content=merged_content,
-            importance=merged_importance,
-            tags=merged_tags,
-            metadata=merged_meta,
-            tier="hot",
-        )
-        # Re-embed the merged content in the vector table.
-        conn.execute(
-            "UPDATE memories_vec SET embedding = ? WHERE id = ?",
-            (json.dumps(merged_embedding), existing.id),
-        )
+        fields: dict[str, object] = {
+            "tags": merged_tags,
+            "metadata": merged_meta,
+            "tier": "hot",
+        }
+        if content_changed:
+            # Only new text earns the bump: a scheduled writer repeating itself
+            # would otherwise climb to 10 in five runs (issue #45).
+            fields["content"] = merged_content
+            fields["importance"] = min(existing.importance + 1.0, 10.0)
+        update_memory(conn, existing.id, **fields)
+
+        if content_changed:
+            # Re-embed the merged content in the vector table.
+            merged_embedding: list[float] = encoder.encode(merged_content)
+            conn.execute(
+                "UPDATE memories_vec SET embedding = ? WHERE id = ?",
+                (json.dumps(merged_embedding), existing.id),
+            )
 
         return DedupResult(
             action="merged",
