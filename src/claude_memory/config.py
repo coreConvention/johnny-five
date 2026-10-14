@@ -37,6 +37,14 @@ class MemorySettings(BaseSettings):
         default=0.15,
         description="Cosine distance below which two memories are near-duplicates.",
     )
+    merge_max_chars: int = Field(
+        default=4000,
+        description=(
+            "Size limit for a memory that near-duplicate stores merge into. "
+            "Past it, the oldest merged additions are dropped; the first "
+            "version and the newest addition are always kept."
+        ),
+    )
 
     # Multi-signal scoring weights
     # alpha+beta+gamma+delta = 1.0; kappa is an additive keyword-boost term
