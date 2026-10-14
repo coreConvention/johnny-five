@@ -27,9 +27,12 @@ from claude_memory.api.app import create_app
 from claude_memory.api.routes import (
     ForgetRequest,
     MemoryListResponse,
+    StoreRequest,
     forget as forget_route,
     list_memories_endpoint,
+    store_memory,
 )
+from claude_memory.config import MemorySettings
 from claude_memory.db.queries import (
     ListQueryError,
     MemoryRecord,
@@ -40,6 +43,8 @@ from claude_memory.db.queries import (
     update_memory,
 )
 from claude_memory.mcp.tools import tool_memory_forget, tool_memory_list
+
+from tests.conftest import every_row_is_near
 
 
 def _dummy_embedding(dim: int = 384) -> list[float]:
@@ -188,6 +193,27 @@ class TestListEndpoint:
         out = await tool_memory_list(limit=5)
         assert out["count"] == len(out["results"]) <= 5
         assert "content" in out["results"][0]  # list view carries content
+
+    async def test_store_route_reports_replaced_snapshot(
+        self, db_conn: sqlite3.Connection, mock_encoder, monkeypatch
+    ) -> None:
+        """Issue #46: the REST model must pass ``superseded`` through, not drop it."""
+        monkeypatch.setattr(
+            "claude_memory.mcp.tools._get_deps",
+            lambda: (_NoCloseConn(db_conn), mock_encoder, MemorySettings()),
+        )
+        monkeypatch.setattr("claude_memory.lifecycle.dedup.search_vec", every_row_is_near)
+
+        def snapshot(content: str) -> StoreRequest:
+            return StoreRequest(
+                content=content, type="project", tags=["session-state"], project_dir="/proj",
+            )
+
+        first = await store_memory(snapshot("snapshot 0"))
+        second = await store_memory(snapshot("snapshot 1"))
+        assert first.action == "inserted"
+        assert second.action == "replaced"
+        assert second.superseded == first.memory_id
 
     async def test_route_returns_model(
         self, db_conn: sqlite3.Connection, sample_memories, monkeypatch

@@ -20,6 +20,7 @@ If you're a human reading this: it's fine, but `BEST_PRACTICES.md` is the versio
 |---|---|---|
 | "Server not connected" | Container not running at session start | Tell user to start Docker + restart Claude Code session. Mid-session reconnect is NOT retried by Claude Code. |
 | Returns `action: merged` not `inserted` | Near-duplicate detected (cosine < 0.15) | This is correct behavior. The dedup engine merged your content into an existing memory. Use the returned `merged_with` ID for any follow-up. |
+| Returns `action: replaced` | A session-state snapshot was close to an earlier snapshot | This is correct behavior. Your snapshot is stored as a new memory (`memory_id`), and the earlier one is archived (`superseded`), so the next session resumes from yours. |
 | Validation error on `type` | Type isn't one of `user / feedback / project / reference / lesson` | Pick from those five. Don't invent new types. |
 | Validation error on `importance` | Out of range 0.0–10.0 | Clamp. |
 

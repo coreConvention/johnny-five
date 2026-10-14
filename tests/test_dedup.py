@@ -18,6 +18,7 @@ from claude_memory.db.queries import (
     MemoryRecord,
     get_memory,
     insert_memory,
+    update_memory,
 )
 from claude_memory.lifecycle.dedup import (
     _MERGE_MARKER,
@@ -26,7 +27,7 @@ from claude_memory.lifecycle.dedup import (
     store_with_dedup,
 )
 
-from tests.conftest import MockEncoder, brute_force_vec_search
+from tests.conftest import MockEncoder, brute_force_vec_search, every_row_is_near
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ def _make_and_insert(
         content=content,
         summary=None,
         type="user",
-        tags=json.dumps(tags or []),
+        tags=tags or [],
         created_at=now,
         updated_at=now,
         last_accessed=now,
@@ -61,8 +62,8 @@ def _make_and_insert(
         project_dir=project_dir,
         source_session=None,
         supersedes=None,
-        consolidated_from=json.dumps([]),
-        metadata=json.dumps(metadata or {}),
+        consolidated_from=[],
+        metadata=metadata or {},
     )
     embedding: list[float] = encoder.encode(content)
     insert_memory(conn, record, embedding)
@@ -683,3 +684,205 @@ class TestStoreProjectIsolation:
         assert result.action == "merged"
         assert result.memory_id == "same-001"
         assert [call.kwargs["top_k"] for call in search_mock.call_args_list] == [5, 10]
+
+
+# ---------------------------------------------------------------------------
+# store_with_dedup — archived rows (issue #48)
+# ---------------------------------------------------------------------------
+
+
+class TestStoreSkipsArchived:
+    """A near-duplicate store must not merge into, and so revive, an archived row."""
+
+    def test_archived_duplicate_stays_archived_and_new_row_inserted(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(db_conn, mock_encoder, id="gone-001", content="Forgotten note")
+        update_memory(db_conn, "gone-001", tier="archived")
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("gone-001", 0.01)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Forgotten note, restated",
+                type="user",
+            )
+
+        gone = get_memory(db_conn, "gone-001")
+        assert result.action == "inserted"
+        assert result.memory_id != "gone-001"
+        assert gone is not None
+        assert gone.tier == "archived"
+        assert gone.content == "Forgotten note"
+
+    def test_skips_archived_candidate_and_merges_later_live_one(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(db_conn, mock_encoder, id="gone-001", content="Old source")
+        update_memory(db_conn, "gone-001", tier="archived")
+        _make_and_insert(db_conn, mock_encoder, id="live-001", content="Consolidated note")
+
+        with patch(
+            "claude_memory.lifecycle.dedup.search_vec",
+            return_value=[("gone-001", 0.01), ("live-001", 0.02)],
+        ):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Consolidated note, restated",
+                type="user",
+            )
+
+        assert result.action == "merged"
+        assert result.memory_id == "live-001"
+        gone = get_memory(db_conn, "gone-001")
+        assert gone is not None
+        assert gone.tier == "archived"
+
+
+# ---------------------------------------------------------------------------
+# store_with_dedup — session-state snapshots (issue #46)
+# ---------------------------------------------------------------------------
+
+
+SNAPSHOT_TAGS: list[str] = ["session-state", "precompact", "mechanical-floor"]
+
+
+class TestSessionStateSnapshots:
+    """A look-alike snapshot replaces the earlier one instead of merging into it."""
+
+    def test_snapshot_replaces_earlier_snapshot(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(
+            db_conn, mock_encoder, id="snap-001", content="branch: a",
+            tags=SNAPSHOT_TAGS, importance=7.0, project_dir="/proj",
+        )
+
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="branch: b",
+                type="project",
+                tags=SNAPSHOT_TAGS,
+                importance=7.0,
+                project_dir="/proj",
+            )
+
+        old = get_memory(db_conn, "snap-001")
+        new = get_memory(db_conn, result.memory_id)
+        assert result.action == "replaced"
+        assert result.superseded == "snap-001"
+        assert result.memory_id != "snap-001"
+        assert old is not None
+        assert old.tier == "archived"
+        assert old.content == "branch: a"
+        assert new is not None
+        assert new.content == "branch: b"
+        assert new.supersedes == "snap-001"
+        assert new.importance == pytest.approx(7.0)
+        assert new.tier == "hot"
+        assert new.created_at >= old.created_at
+
+    def test_repeated_snapshots_leave_one_live_newest_snapshot(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        ids: list[str] = []
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            for step in range(4):
+                result = store_with_dedup(
+                    conn=db_conn,
+                    encoder=mock_encoder,
+                    content=f"snapshot {step}",
+                    type="project",
+                    tags=SNAPSHOT_TAGS,
+                    project_dir="/proj",
+                )
+                ids.append(result.memory_id)
+
+        live = db_conn.execute(
+            "SELECT id, content FROM memories WHERE tier != 'archived'"
+        ).fetchall()
+        assert [(row["id"], row["content"]) for row in live] == [(ids[-1], "snapshot 3")]
+        # Each snapshot supersedes the one before it, never an archived one.
+        assert [get_memory(db_conn, i).supersedes for i in ids] == [None, *ids[:-1]]
+
+    def test_snapshot_does_not_merge_into_a_note(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(
+            db_conn, mock_encoder, id="note-001", content="Design note",
+            tags=["design"], project_dir="/proj",
+        )
+
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="snapshot",
+                type="project",
+                tags=SNAPSHOT_TAGS,
+                project_dir="/proj",
+            )
+
+        note = get_memory(db_conn, "note-001")
+        assert result.action == "inserted"
+        assert note is not None
+        assert note.content == "Design note"
+        assert note.tags == ["design"]
+        assert note.tier == "hot"
+
+    def test_note_does_not_merge_into_a_snapshot(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(
+            db_conn, mock_encoder, id="snap-001", content="snapshot",
+            tags=["kind:session-state"], project_dir="/proj",
+        )
+        _make_and_insert(
+            db_conn, mock_encoder, id="note-001", content="Design note",
+            project_dir="/proj",
+        )
+
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="Design note, restated",
+                type="project",
+                project_dir="/proj",
+            )
+
+        snapshot = get_memory(db_conn, "snap-001")
+        assert result.action == "merged"
+        assert result.memory_id == "note-001"
+        assert snapshot is not None
+        assert snapshot.content == "snapshot"
+        assert snapshot.tier == "hot"
+
+    def test_snapshot_in_another_scope_is_not_replaced(
+        self, db_conn: sqlite3.Connection, mock_encoder: MockEncoder
+    ) -> None:
+        _make_and_insert(
+            db_conn, mock_encoder, id="snap-other", content="their snapshot",
+            tags=SNAPSHOT_TAGS, project_dir="/other",
+        )
+
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            result = store_with_dedup(
+                conn=db_conn,
+                encoder=mock_encoder,
+                content="my snapshot",
+                type="project",
+                tags=SNAPSHOT_TAGS,
+                project_dir="/proj",
+            )
+
+        other = get_memory(db_conn, "snap-other")
+        assert result.action == "inserted"
+        assert other is not None
+        assert other.tier == "hot"

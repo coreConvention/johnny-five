@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from claude_memory import config
 from claude_memory.db import connection as connection_module
 from claude_memory.db import queries
+from claude_memory.lifecycle.dedup import store_with_dedup
 from claude_memory.mcp import tools
 
-from tests.conftest import _TEST_SCHEMA_SQL
+from tests.conftest import _TEST_SCHEMA_SQL, MockEncoder, every_row_is_near
 
 HOOK: Path = Path(__file__).parents[1] / "setup" / "hooks" / "session-start-recall.sh"
 CWD: str = "Z:/proj/app"
@@ -263,3 +266,32 @@ def test_naive_created_at_label_is_utc(hook: Harness, capsys) -> None:
     """A naive timestamp is UTC, not the raw-string fallback."""
     hook.seed("2026-09-29T21:30:00")
     assert f"{HDR}  (2026-09-29 21:30 UTC, importance 7.5)" in hook.run(capsys)
+
+
+def test_resume_shows_newest_of_repeated_snapshot_stores(hook: Harness, capsys) -> None:
+    """Issue #46: look-alike snapshots merged into the first, and the resume
+    rendered that first (oldest) snapshot under the first snapshot's time."""
+    conn = sqlite3.connect(str(hook.db))
+    conn.row_factory = sqlite3.Row
+    with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+        for step in range(3):
+            store_with_dedup(
+                conn=conn,
+                encoder=MockEncoder(dim=384),
+                content=f"SNAPSHOT-{step}",
+                type="project",
+                tags=["session-state", "precompact", "mechanical-floor"],
+                importance=7.0,
+                project_dir=CWD,
+            )
+    conn.commit()
+    newest_created: str = conn.execute(
+        "SELECT created_at FROM memories WHERE content = 'SNAPSHOT-2'"
+    ).fetchone()["created_at"]
+    conn.close()
+
+    text: str = hook.run(capsys)
+    label: str = datetime.fromisoformat(newest_created).strftime("%Y-%m-%d %H:%M UTC")
+    assert f"{HDR}  ({label}, importance 7.0)\n```\nSNAPSHOT-2\n```" in text
+    assert "SNAPSHOT-0" not in text
+    assert "SNAPSHOT-1" not in text

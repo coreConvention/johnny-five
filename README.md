@@ -289,6 +289,8 @@ When storing a memory, the system checks for near-duplicates (cosine distance < 
 - Text that contains the whole memory replaces it rather than repeating it.
 - Anything else is appended after a `--- merged update ---` marker, importance is bumped by 1, and the memory is re-embedded. Past `MEMORY_MERGE_MAX_CHARS` (default 4000), the oldest merged additions are dropped; the first version and the newest addition are always kept, so a recurring store cannot grow one memory without limit.
 
+Archived memories are never merge targets, so a forgotten or superseded memory stays archived. Session-state snapshots (tagged `session-state`, `precompact` or `kind:session-state`) are never merged: a snapshot close to an earlier snapshot is inserted as a new memory that supersedes it, the earlier one is archived, and the call returns `"action": "replaced"` with the archived id in `superseded`. Snapshots and other memories are never merge targets for each other. The session-start resume shows the newest snapshot by creation time, which a merge would leave at the first snapshot's time.
+
 ## Benchmarks
 
 johnny-five's retrieval pipeline is measured against three published memory benchmarks using the same datasets and methodology mempalace reports their numbers on. Full methodology, per-category breakdowns, and reproducibility commands live in [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md).
