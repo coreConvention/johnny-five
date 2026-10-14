@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from unittest.mock import patch
 
 import pytest
 
 from claude_memory.db import queries
+from claude_memory.lifecycle.dedup import store_with_dedup
+
+from tests.conftest import every_row_is_near
 
 PROJECT: str = "/proj"
 NOW: str = "2026-09-29T12:00:00+00:00"
@@ -186,3 +190,28 @@ class TestNaiveAndUnfilteredChoice:
         _row(db_conn, "old-hot", T10, tier="hot", importance=10.0)
         _row(db_conn, "new", T11, tier=tier)
         assert _lookup(db_conn, PROJECT) == "new"
+
+
+class TestAfterRepeatedStores:
+    """Issue #46: look-alike snapshots used to merge into the first one's row."""
+
+    def test_lookup_returns_the_newest_stored_snapshot(self, db_conn, mock_encoder) -> None:
+        ids: list[str] = []
+        with patch("claude_memory.lifecycle.dedup.search_vec", side_effect=every_row_is_near):
+            for step in range(3):
+                result = store_with_dedup(
+                    conn=db_conn,
+                    encoder=mock_encoder,
+                    content=f"snapshot {step}",
+                    type="project",
+                    tags=["session-state", "precompact", "mechanical-floor"],
+                    project_dir=PROJECT,
+                )
+                ids.append(result.memory_id)
+        # Commit: an open write transaction refuses create_function (issue #31).
+        db_conn.commit()
+
+        row = queries.get_latest_session_state(db_conn, PROJECT)
+        assert row is not None
+        assert row["id"] == ids[-1]
+        assert row["content"] == "snapshot 2"

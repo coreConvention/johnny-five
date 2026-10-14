@@ -266,6 +266,7 @@ async def tool_memory_store(
             "action": result.action,
             "memory_id": result.memory_id,
             "merged_with": result.merged_with,
+            "superseded": result.superseded,
         }
     finally:
         conn.close()

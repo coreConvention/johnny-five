@@ -552,7 +552,9 @@ def get_always_load(
     return [*scoped[:take_scoped], *global_ids[:take_global]]
 
 
-_SESSION_STATE_TAGS: tuple[str, ...] = (
+# Any one of these tags marks a session-state snapshot. Dedup uses the same
+# set (issue #46), so whatever the resume can show is replaced, never merged.
+SESSION_STATE_TAGS: tuple[str, ...] = (
     "session-state", "precompact", "kind:session-state",
 )
 
@@ -560,7 +562,7 @@ _SESSION_STATE_TAGS: tuple[str, ...] = (
 def get_latest_session_state(
     conn: sqlite3.Connection,
     project_dir: str | None,
-    tags: tuple[str, ...] = _SESSION_STATE_TAGS,
+    tags: tuple[str, ...] = SESSION_STATE_TAGS,
 ) -> sqlite3.Row | None:
     """Return the newest non-archived session-state memory for *project_dir*.
 

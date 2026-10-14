@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from ulid import ULID
 
 from claude_memory.db.queries import (
+    SESSION_STATE_TAGS,
     MemoryRecord,
     get_memory,
     insert_memory,
@@ -24,14 +25,21 @@ from claude_memory.scope import is_exact_scope_match
 class DedupResult:
     """Outcome of a :func:`store_with_dedup` call."""
 
-    action: str  # "inserted" | "merged"
+    action: str  # "inserted" | "merged" | "replaced"
     memory_id: str
     merged_with: str | None = None
+    # The archived snapshot a "replaced" store took the place of.
+    superseded: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_session_state(tags: list[str]) -> bool:
+    """Return whether *tags* mark a session-state snapshot."""
+    return any(tag in SESSION_STATE_TAGS for tag in tags)
 
 
 def _merge_content(existing: str, new: str) -> str:
@@ -51,8 +59,15 @@ def _find_near_duplicate(
     embedding: list[float],
     project_dir: str | None,
     dedup_threshold: float,
+    session_state: bool,
 ) -> MemoryRecord | None:
     """Find the nearest live, compatible duplicate without foreign-candidate starvation.
+
+    Compatible means the same exact project scope and the same kind: a
+    session-state snapshot only matches another snapshot, and any other memory
+    only matches a non-snapshot. Otherwise a note could be appended into a
+    snapshot that the next snapshot then archives, and a snapshot merged into
+    a note would tag that note as session-state (issue #46).
 
     Archived rows never match: the merge sets ``tier="hot"``, so merging into
     one would bring a forgotten or superseded memory back (issue #48).
@@ -72,15 +87,18 @@ def _find_near_duplicate(
             existing: MemoryRecord | None = get_memory(conn, candidate_id)
             if existing is None or existing.tier == "archived":
                 continue
-            if is_exact_scope_match(existing.project_dir, project_dir):
+            if (
+                is_exact_scope_match(existing.project_dir, project_dir)
+                and _is_session_state(existing.tags) == session_state
+            ):
                 return existing
 
         if len(candidates) < candidate_limit:
             return None
 
         # All returned candidates were near-duplicates that cannot match
-        # (archived, or in an incompatible scope). Expand until the ordered
-        # result set reaches the threshold or is exhausted.
+        # (archived, another kind, or in an incompatible scope). Expand until
+        # the ordered result set reaches the threshold or is exhausted.
         candidate_limit *= 2
 
 
@@ -107,10 +125,15 @@ def store_with_dedup(
     -------
     1. Generate an embedding for *content*.
     2. Search for near-duplicates in the same exact project scope whose cosine
-       distance is below *dedup_threshold*.
+       distance is below *dedup_threshold*, among live rows of the same kind
+       (session-state snapshot or not; see :func:`_find_near_duplicate`).
     3. **If a duplicate is found** — merge the new content into the
        existing memory, bump importance by 1.0 (capped at 10.0),
        re-embed the merged text, and update the record in-place.
+       A session-state snapshot is never merged: it is inserted as a fresh
+       record that supersedes the earlier snapshot, which is archived.  The
+       resume shows the newest snapshot by ``created_at``, and a merge would
+       leave that at the first snapshot's time (issue #46).
     4. **If no duplicate** — generate a new ULID and insert a fresh
        record.
 
@@ -143,10 +166,11 @@ def store_with_dedup(
     Returns
     -------
     DedupResult
-        Describes whether a new record was inserted or an existing one
-        was merged.
+        Describes whether a new record was inserted, an existing one was
+        merged, or an earlier snapshot was replaced.
     """
     embedding: list[float] = encoder.encode(content)
+    snapshot: bool = _is_session_state(tags or [])
 
     # -- Step 1: look for near-duplicates via vector search ----------------
     existing: MemoryRecord | None = _find_near_duplicate(
@@ -154,9 +178,10 @@ def store_with_dedup(
         embedding,
         project_dir,
         dedup_threshold,
+        snapshot,
     )
 
-    if existing is not None:
+    if existing is not None and not snapshot:
         # -- Merge into existing record ------------------------------------
         merged_content: str = _merge_content(existing.content, content)
         merged_importance: float = min(existing.importance + 1.0, 10.0)
@@ -198,7 +223,8 @@ def store_with_dedup(
             merged_with=existing.id,
         )
 
-    # -- Step 2: no duplicate — insert a new record ------------------------
+    # -- Step 2: no duplicate, or a snapshot replacing one — insert ---------
+    superseded: str | None = existing.id if existing is not None else None
     memory_id: str = str(ULID())
     now: str = datetime.now(timezone.utc).isoformat()
 
@@ -216,11 +242,15 @@ def store_with_dedup(
         tier="hot",
         project_dir=project_dir,
         source_session=source_session,
-        supersedes=None,
+        supersedes=superseded,
         consolidated_from=[],
         metadata=metadata or {},
     )
 
     insert_memory(conn, record, embedding)
+
+    if superseded is not None:
+        update_memory(conn, superseded, tier="archived")
+        return DedupResult(action="replaced", memory_id=memory_id, superseded=superseded)
 
     return DedupResult(action="inserted", memory_id=memory_id)

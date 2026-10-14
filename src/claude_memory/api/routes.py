@@ -51,11 +51,12 @@ class StoreRequest(BaseModel):
 
 
 class StoreResponse(BaseModel):
-    """Result of a store operation — indicates insert or merge."""
+    """Result of a store operation — indicates insert, merge or replace."""
 
     action: str
     memory_id: str
     merged_with: str | None = None
+    superseded: str | None = None
 
 
 class SearchRequest(BaseModel):

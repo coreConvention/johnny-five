@@ -107,6 +107,21 @@ def brute_force_vec_search(
     return results[:top_k]
 
 
+def every_row_is_near(
+    conn: sqlite3.Connection,
+    embedding: list[float],
+    top_k: int = 5,
+) -> list[tuple[str, float]]:
+    """Stand-in for ``search_vec`` that reports every row as a near-duplicate.
+
+    Rows come oldest first, all at distance 0.05 (under the 0.15 dedup
+    threshold). Look-alike session-state snapshots really do land that close
+    (issue #46), and :class:`MockEncoder` hashes cannot make texts similar.
+    """
+    rows = conn.execute("SELECT id FROM memories ORDER BY rowid").fetchall()
+    return [(row["id"], 0.05) for row in rows[:top_k]]
+
+
 # ---------------------------------------------------------------------------
 # Database fixture
 # ---------------------------------------------------------------------------

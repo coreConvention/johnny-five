@@ -285,7 +285,7 @@ hot  →  warm  →  cold  →  archived
 
 When storing a memory, the system checks for near-duplicates (cosine distance < 0.15). If found, it merges the new content into the existing memory, bumps importance, re-embeds, and returns `"action": "merged"` instead of `"inserted"`.
 
-Archived memories are never merge targets, so a forgotten or superseded memory stays archived.
+Archived memories are never merge targets, so a forgotten or superseded memory stays archived. Session-state snapshots (tagged `session-state`, `precompact` or `kind:session-state`) are never merged: a snapshot close to an earlier snapshot is inserted as a new memory that supersedes it, the earlier one is archived, and the call returns `"action": "replaced"` with the archived id in `superseded`. Snapshots and other memories are never merge targets for each other. The session-start resume shows the newest snapshot by creation time, which a merge would leave at the first snapshot's time.
 
 ## Benchmarks
 
