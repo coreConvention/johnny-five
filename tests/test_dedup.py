@@ -51,7 +51,7 @@ def _make_and_insert(
         content=content,
         summary=None,
         type="user",
-        tags=json.dumps(tags or []),
+        tags=tags or [],
         created_at=now,
         updated_at=now,
         last_accessed=now,
@@ -61,8 +61,8 @@ def _make_and_insert(
         project_dir=project_dir,
         source_session=None,
         supersedes=None,
-        consolidated_from=json.dumps([]),
-        metadata=json.dumps(metadata or {}),
+        consolidated_from=[],
+        metadata=metadata or {},
     )
     embedding: list[float] = encoder.encode(content)
     insert_memory(conn, record, embedding)
