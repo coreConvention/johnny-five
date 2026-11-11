@@ -7,6 +7,7 @@ and returns a plain dict suitable for JSON serialization.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import asdict
 
@@ -14,6 +15,7 @@ from claude_memory.config import MemorySettings, get_settings
 from claude_memory.db.connection import get_connection
 from claude_memory.db.queries import (
     MemoryRecord,
+    content_sha256,
     delete_memory,
     get_memory,
     get_stats,
@@ -80,6 +82,8 @@ def _search_result_to_dict(result: SearchResult) -> dict:
     return {
         "id": result.memory.id,
         "content": result.memory.content,
+        # Sent back as memory_update's expected_content_sha256 (issue #52).
+        "content_sha256": content_sha256(result.memory.content),
         "type": result.memory.type,
         "tags": result.memory.tags if isinstance(result.memory.tags, list) else json.loads(result.memory.tags or "[]"),
         "importance": result.memory.importance,
@@ -399,11 +403,17 @@ async def tool_memory_update(
     tags: list[str] | None = None,
     type: str | None = None,
     project_dir: str | None = None,
+    expected_content_sha256: str | None = None,
 ) -> dict:
     """Update an existing memory.
 
     Only the provided fields are modified; all others remain unchanged.
     If *content* is updated, the embedding is also re-computed.
+
+    Returns ``{"updated": True, "memory_id": ...}`` on success, plus
+    ``"condition_checked": True`` when *expected_content_sha256* was given and
+    held. That key is how a caller tells the condition was honoured: a server
+    that predates it would have ignored the field, and its answer lacks the key.
 
     Parameters
     ----------
@@ -424,13 +434,34 @@ async def tool_memory_update(
         refuses to make. A move to a different canonical scope appends the old
         scope to ``metadata["previous_project_dirs"]``, so it can be audited
         and reversed.
+    expected_content_sha256:
+        Write only if the memory's content is still the content the caller
+        read: the lower-case hex SHA-256 of that content's UTF-8 bytes (the
+        read paths return it as ``content_sha256``). Without it, two callers
+        that read the same memory and write it back erase each other's edit
+        silently (issue #52). When the content has changed the write is
+        refused with ``updated: False`` and ``conflict: True``; re-read the
+        memory and apply the edit again. It guards the content only, whichever
+        fields the update sets.
     """
+    expected_hash: str | None = None
+    if expected_content_sha256 is not None:
+        expected_hash = expected_content_sha256.strip().lower()
+        if not _SHA256_HEX.fullmatch(expected_hash):
+            return {
+                "updated": False,
+                "memory_id": memory_id,
+                "error": "expected_content_sha256 must be 64 hexadecimal characters",
+            }
+
     conn, encoder, settings = _get_deps()
     try:
         # Verify the memory exists.
         existing: MemoryRecord | None = get_memory(conn, memory_id)
         if existing is None:
             return {"updated": False, "memory_id": memory_id, "error": "Memory not found"}
+        if expected_hash is not None and content_sha256(existing.content) != expected_hash:
+            return _content_conflict(memory_id)
 
         # Collect fields to update.
         fields: dict = {}
@@ -463,20 +494,56 @@ async def tool_memory_update(
         if not fields:
             return {"updated": False, "memory_id": memory_id, "error": "No fields to update"}
 
-        update_memory(conn, memory_id, **fields)
+        # Encode BEFORE the first write: the UPDATE opens the write transaction,
+        # so encoding after it held SQLite's write lock for the whole encode.
+        # It also means the conditional UPDATE below decides on the content as
+        # it is when the write happens, not as it was before a slow encode.
+        new_embedding: list[float] | None = (
+            encoder.encode(content) if content is not None else None
+        )
 
-        # Re-embed if content changed.
-        if content is not None:
-            new_embedding: list[float] = encoder.encode(content)
+        changed: int = update_memory(
+            conn,
+            memory_id,
+            # The stored text whose hash the caller confirmed above. If another
+            # writer changed it since, the UPDATE matches no row.
+            expected_content=existing.content if expected_hash is not None else None,
+            **fields,
+        )
+        if expected_hash is not None and changed == 0:
+            conn.rollback()
+            return _content_conflict(memory_id)
+
+        if new_embedding is not None:
             conn.execute(
                 "UPDATE memories_vec SET embedding = ? WHERE id = ?",
                 (json.dumps(new_embedding), memory_id),
             )
 
         conn.commit()
-        return {"updated": True, "memory_id": memory_id}
+        result: dict = {"updated": True, "memory_id": memory_id}
+        if expected_hash is not None:
+            result["condition_checked"] = True
+        return result
     finally:
         conn.close()
+
+
+_SHA256_HEX: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
+
+
+def _content_conflict(memory_id: str) -> dict:
+    """The refusal ``tool_memory_update`` returns when the condition fails."""
+    return {
+        "updated": False,
+        "memory_id": memory_id,
+        "conflict": True,
+        "error": (
+            "The memory's content has changed since you read it, so this update "
+            "was not written. Read the memory again and apply your edit to the "
+            "current content."
+        ),
+    }
 
 
 async def tool_memory_forget(
@@ -682,7 +749,13 @@ async def tool_memory_get(memory_id: str) -> dict:
         record: MemoryRecord | None = get_memory(conn, memory_id)
         if record is None:
             return {"found": False, "id": memory_id, "error": "Memory not found"}
-        return {"found": True, **_record_to_list_dict(record)}
+        # content_sha256 is what a caller sends back as expected_content_sha256
+        # to make its PATCH conditional on this exact text (issue #52).
+        return {
+            "found": True,
+            **_record_to_list_dict(record),
+            "content_sha256": content_sha256(record.content),
+        }
     finally:
         conn.close()
 

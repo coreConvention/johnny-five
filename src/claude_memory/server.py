@@ -258,6 +258,18 @@ async def list_tools() -> list[Tool]:
                             "metadata.previous_project_dirs."
                         ),
                     },
+                    "expected_content_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-fA-F]{64}$",
+                        "description": (
+                            "Write only if the memory's content is still what you read: "
+                            "its content_sha256 from memory_search (hex SHA-256 of the "
+                            "UTF-8 content). If another writer changed it since, nothing "
+                            "is written and the answer is updated=false, conflict=true; "
+                            "re-read and apply your edit again. A write that held it "
+                            "answers condition_checked=true."
+                        ),
+                    },
                 },
                 "required": ["memory_id"],
             },
