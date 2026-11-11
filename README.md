@@ -151,7 +151,7 @@ set this for you.)
 | `memory_store` | Store a memory with automatic near-duplicate detection and merge |
 | `memory_search` | Multi-signal retrieval: semantic similarity + recency + frequency + importance |
 | `memory_recall` | Session-start recall — loads high-importance memories + semantically relevant context |
-| `memory_update` | Update content, importance, tags, type, or project scope (content changes re-embed automatically; a scope move keeps the old scope in metadata) |
+| `memory_update` | Update content, importance, tags, type, or project scope (content changes re-embed automatically; a scope move keeps the old scope in metadata). Optional `expected_content_sha256` makes it write only if the content is still what you read; see [Conditional updates](#conditional-updates) |
 | `memory_forget` | Archive (soft delete) or permanently delete a memory |
 | `memory_consolidate` | Cluster and summarize cold-tier memories |
 | `memory_stats` | Database statistics by type and tier |
@@ -252,6 +252,37 @@ Full schema at `/docs`. Beyond the browse/mutate routes:
 Both read routes deliberately **do not** bump `access_count`. Retrieval frequency
 is one of the signals that ranks memories, so an inspection surface that counted
 as a retrieval would distort the very ordering it exists to show you.
+
+### Conditional updates
+
+`PATCH /api/v1/memories/{id}` and `memory_update` replace a memory's whole
+content. Two callers that read the same memory, each change one part and write it
+back would otherwise erase each other with no error: the later write wins. To
+write only if nobody changed the memory since you read it, send the hash of the
+content you read:
+
+1. Read the memory. `GET /api/v1/memories/{id}` and `memory_search` results carry
+   `content_sha256`: the lower-case hex SHA-256 of the content's UTF-8 bytes.
+2. Send it back as `expected_content_sha256` with your update.
+
+| Outcome | REST | MCP `memory_update` |
+| --- | --- | --- |
+| Content unchanged, write made | `200` `{"updated": true, "memory_id": ..., "condition_checked": true}` | same object |
+| Content changed since you read it, nothing written | `409` with a plain message | `{"updated": false, "conflict": true, "error": ...}` |
+| Not 64 hex characters | `422` | `{"updated": false, "error": ...}` |
+
+On a conflict, read the memory again and apply your edit to the current content.
+The comparison is part of the `UPDATE` statement, so a write that lands while
+your update is re-embedding is caught too. The condition guards the content only,
+whatever fields the update sets. With no condition an update behaves exactly as it
+always has.
+
+**Check for `condition_checked: true`.** Unknown fields in a `PATCH` body are
+ignored, so a server older than this option would make the write unconditionally
+and answer without that key. Its absence on a success means the condition was not
+checked. (The route keeps ignoring unknown fields rather than refusing them,
+because refusing them would change the answer for callers that send no condition.
+An older MCP server refuses the unknown argument outright and writes nothing.)
 
 ## How It Works
 

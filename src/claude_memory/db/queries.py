@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -189,12 +190,37 @@ def get_memory(conn: sqlite3.Connection, id: str) -> MemoryRecord | None:
     return _row_to_record(row)
 
 
-def update_memory(conn: sqlite3.Connection, id: str, **fields: object) -> None:
+def content_sha256(content: str) -> str:
+    """Lower-case hex SHA-256 of *content* encoded as UTF-8.
+
+    This is the value a caller sends as ``expected_content_sha256`` to make an
+    update conditional on the content it read (issue #52), so it is also
+    returned by the read paths as ``content_sha256``.
+    """
+    return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def update_memory(
+    conn: sqlite3.Connection,
+    id: str,
+    *,
+    expected_content: str | None = None,
+    **fields: object,
+) -> int:
     """Partial update — set only the provided columns.
 
     JSON-serialisable fields (``tags``, ``consolidated_from``, ``metadata``)
     are automatically dumped to JSON strings.  The ``updated_at`` timestamp
     is always refreshed.
+
+    With *expected_content*, the row is changed only if its stored content is
+    still exactly that text. The comparison is part of the ``UPDATE`` itself,
+    so it is decided under SQLite's write lock and no other writer can slip in
+    between the check and the write. Comparing the text, rather than its hash,
+    needs no SQL function, so it avoids registering one per call (issue #31).
+
+    Returns the number of rows changed: 0 means the memory is missing or, with
+    *expected_content*, that its content no longer matches.
 
     Raises :class:`ValueError` if no fields are supplied.
     """
@@ -215,11 +241,16 @@ def update_memory(conn: sqlite3.Connection, id: str, **fields: object) -> None:
     set_clause: str = ", ".join(f"{col} = ?" for col in processed)
     values: list[object] = list(processed.values())
     values.append(id)
+    where_clause: str = "id = ?"
+    if expected_content is not None:
+        where_clause += " AND content = ?"
+        values.append(expected_content)
 
-    conn.execute(
-        f"UPDATE memories SET {set_clause} WHERE id = ?",  # noqa: S608
+    cursor: sqlite3.Cursor = conn.execute(
+        f"UPDATE memories SET {set_clause} WHERE {where_clause}",  # noqa: S608
         values,
     )
+    return cursor.rowcount
 
 
 def delete_memory(conn: sqlite3.Connection, id: str) -> None:

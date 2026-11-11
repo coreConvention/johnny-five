@@ -115,6 +115,14 @@ class UpdateRequest(BaseModel):
         default=None, pattern="^(user|feedback|project|reference|lesson)$"
     )
     project_dir: str | None = None
+    # Write only if the stored content is still the content the caller read
+    # (issue #52): its hex SHA-256, as GET /memories/{id} returns it in
+    # content_sha256. A failed condition is a 409. The answer carries
+    # condition_checked: true when it held, which is how a caller tells this
+    # server honoured it: an older one ignores the field and omits the key.
+    expected_content_sha256: str | None = Field(
+        default=None, pattern="^[0-9a-fA-F]{64}$"
+    )
 
 
 class ForgetRequest(BaseModel):
@@ -243,11 +251,19 @@ async def get_one(memory_id: str) -> dict:
 
 @router.patch("/memories/{memory_id}")
 async def update(memory_id: str, request: UpdateRequest) -> dict:
-    """Partially update an existing memory's fields."""
+    """Partially update an existing memory's fields.
+
+    With ``expected_content_sha256`` the write happens only if the stored
+    content still hashes to it; otherwise nothing is written and the answer is
+    ``409``.
+    """
     fields: dict = request.model_dump(exclude_none=True)
-    if not fields:
+    # The condition alone changes nothing, so it does not count as a field.
+    if not fields.keys() - {"expected_content_sha256"}:
         raise HTTPException(status_code=400, detail="No fields to update")
     result: dict = await tool_memory_update(memory_id=memory_id, **fields)
+    if result.get("conflict"):
+        raise HTTPException(status_code=409, detail=result["error"])
     return result
 
 
