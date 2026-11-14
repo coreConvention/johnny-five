@@ -298,6 +298,46 @@ def test_stop_hook_emits_valid_block_json(tmp_path: Path) -> None:
     assert output["reason"]
 
 
+@pytest.mark.parametrize(
+    ("memory_tool", "blocks"),
+    [
+        ("mcp__johnny-five__memory_store", False),
+        ("mcp__johnny_five__memory_store", False),
+        ("mcp__johnny-five__memory_update", False),
+        ("mcp__johnny_five__memory_update", False),
+        ("mcp__johnny-five__memory_search", True),
+    ],
+)
+def test_memory_write_after_three_edits_lets_the_turn_end(
+    tmp_path: Path, memory_tool: str, blocks: bool
+) -> None:
+    """Issue #54: updating an existing lesson is a memory write, like storing one.
+
+    The guidance is "search before storing; update instead of duplicating", so
+    a turn that ends with memory_update must not be blocked. A search alone is
+    not a write and still leaves the block in place.
+    """
+    edit_payload = _fixture("codex-post-tool-use.json")
+    for _ in range(3):
+        result = _run_node_hook("memory-discipline-track.js", edit_payload, tmp_path)
+        assert result.returncode == 0
+
+    memory_payload = edit_payload | {
+        "tool_name": memory_tool,
+        "tool_input": {"memory_id": "01EXAMPLE", "content": "lesson text"},
+    }
+    result = _run_node_hook("memory-discipline-track.js", memory_payload, tmp_path)
+    assert result.returncode == 0
+
+    result = _run_node_hook("memory-discipline-enforce.js", _fixture("codex-stop.json"), tmp_path)
+
+    assert result.returncode == 0
+    if blocks:
+        assert json.loads(result.stdout)["decision"] == "block"
+    else:
+        assert result.stdout == ""
+
+
 def test_stop_hook_active_does_not_create_continuation_loop(tmp_path: Path) -> None:
     payload = _fixture("codex-stop.json") | {"stop_hook_active": True}
 

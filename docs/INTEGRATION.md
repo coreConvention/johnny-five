@@ -218,8 +218,8 @@ Tier 3 *searches* on a correction and *advises* after repeat failures, but nothi
 Three hooks turn the search-first rule from advisory into mandatory:
 
 - `memory-context-inject.sh` (**PreToolUse**) — before an `Edit`/`Write` on a risky code path, or a curated risky `Bash` command, it runs `memory_search` (top-2, `token_budget=400`, score ≥ 0.55 gate) and injects the hits as `additionalContext`, so prior lessons appear *before* the model acts. A 5-minute per-key cache prevents re-firing on consecutive edits. **The path glob and command patterns in this script are generic examples — tune them to your codebase's footguns.**
-- `memory-discipline-track.js` (**PostToolUse**) — counts edits / stores / searches for the turn into `~/.claude/hooks/state/memory-discipline-<session>.json`. Never blocks; it only feeds the enforcer.
-- `memory-discipline-enforce.js` (**command-type Stop**) — reads that state file and **blocks Stop** when either: (Gate 1) the turn had ≥ 3 edits and 0 `memory_store` calls, or (Gate 2) a correction fired this turn (`user-prompt-correction.sh` set `correction_seen`) and no `memory_search` has happened since. The block message tells the model exactly what to do.
+- `memory-discipline-track.js` (**PostToolUse**) — counts edits / memory writes (stores and updates) / searches for the turn into `~/.claude/hooks/state/memory-discipline-<session>.json`. Never blocks; it only feeds the enforcer.
+- `memory-discipline-enforce.js` (**command-type Stop**) — reads that state file and **blocks Stop** when either: (Gate 1) the turn had ≥ 3 edits and 0 memory writes (`memory_store` or `memory_update`; updating an existing lesson counts), or (Gate 2) a correction fired this turn (`user-prompt-correction.sh` set `correction_seen`) and no `memory_search` has happened since. The block message tells the model exactly what to do.
 
 ### Installation
 
