@@ -2,8 +2,8 @@
 // memory-discipline-enforce.js
 // Stop hook. Reads per-session counters written by memory-discipline-track.js.
 // Blocks Stop when the current turn had ≥3 file edits and 0 johnny-five
-// memory_store calls — forcing the assistant to either store a lesson or
-// explicitly justify the turn before ending.
+// memory writes (memory_store or memory_update) — forcing the assistant to
+// either store or update a lesson, or explicitly justify the turn before ending.
 //
 // Pairs with memory-discipline-track.js (PostToolUse).
 // State files live below the deployed hook directory.
@@ -74,9 +74,10 @@ function main() {
   if (heavyTurn && !stored) {
     const reason =
       `Memory-discipline check: this turn made ${edits} file edits but did not call ` +
-      `\`mcp__johnny-five__memory_store\` once. Before ending, decide:\n\n` +
+      `\`mcp__johnny-five__memory_store\` or \`memory_update\` once. Before ending, decide:\n\n` +
       `  (a) Store at least one lesson/project memory now (preferred). Search first ` +
-      `with \`memory_search\` to avoid duplicates, then \`memory_store\` with ` +
+      `with \`memory_search\`; if the lesson already exists, \`memory_update\` it ` +
+      `(that counts), otherwise \`memory_store\` with ` +
       `project_dir set to the repository's main checkout (from a worktree too) ` +
       `and importance ≥6 for genuine lessons. ` +
       `What to capture: user corrections, non-obvious bug root causes, silent ` +

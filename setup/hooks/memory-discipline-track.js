@@ -2,7 +2,9 @@
 // memory-discipline-track.js
 // PostToolUse hook. Tracks per-session counts of:
 //   - File-modifying tools (Edit, Write, apply_patch) → "edits"
-//   - johnny-five memory_store calls → "stores"
+//   - johnny-five memory_store and memory_update calls → "stores"
+//     (updating an existing lesson is the guidance's answer to a duplicate,
+//     so it counts as a memory write; issue #54)
 //   - johnny-five memory_search calls → "searches"
 //
 // Pairs with memory-discipline-enforce.js (Stop hook), which reads the same
@@ -29,6 +31,8 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'apply_patch']);
 const STORE_TOOLS = new Set([
   'mcp__johnny-five__memory_store',
   'mcp__johnny_five__memory_store',
+  'mcp__johnny-five__memory_update',
+  'mcp__johnny_five__memory_update',
 ]);
 const SEARCH_TOOLS = new Set([
   'mcp__johnny-five__memory_search',
